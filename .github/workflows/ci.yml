@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  bash:
+    name: Bash (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck and bats
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then brew install shellcheck; else sudo apt-get update && sudo apt-get install -y shellcheck sqlite3; fi
+          git clone --depth 1 --branch v1.11.0 https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/bats"
+      - name: Show the bash used for tests
+        run: /bin/bash --version | head -n 1
+      - name: ShellCheck
+        run: shellcheck -x twindesk install.sh test/helpers.bash
+      - name: Bash syntax with system bash
+        run: /bin/bash -n twindesk && /bin/bash -n install.sh
+      - name: Unit tests (bats, script run by /bin/bash)
+        run: TD_BASH=/bin/bash "$RUNNER_TEMP/bats/bin/bats" test/
+
+  powershell:
+    name: PowerShell (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Pester and PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 5.6.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.22.0 -Scope CurrentUser -Force
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $r = 'twindesk.ps1', 'install.ps1', 'test/twindesk.Tests.ps1' | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Settings ./PSScriptAnalyzerSettings.psd1 }
+          $r | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message
+          if (@($r).Count -gt 0) { exit 1 }
+      - name: Pester (PowerShell 7)
+        shell: pwsh
+        run: |
+          $c = New-PesterConfiguration
+          $c.Run.Path = 'test'
+          $c.Run.Exit = $true
+          $c.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $c
+      - name: Pester (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Install-Module Pester -RequiredVersion 5.6.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion 5.6.1
+          $c = New-PesterConfiguration
+          $c.Run.Path = 'test'
+          $c.Run.Exit = $true
+          $c.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $c
