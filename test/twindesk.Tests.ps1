@@ -8,6 +8,10 @@ BeforeAll {
 
     function Invoke-Td {
         param([string[]]$Arguments, [string]$StdIn = '')
+        # Windows PowerShell 5.1 turns a native command's stderr lines into
+        # errors when they are redirected; with 'Stop' (set by CI) each
+        # 'error:' line would abort the test before the exit code is read.
+        $ErrorActionPreference = 'Continue'
         # Piped stdin: the script sees a non-interactive session, as in CI.
         $out = $StdIn | & $script:Pwsh -NoProfile -NonInteractive -File $script:Ps1 @Arguments 2>&1
         [pscustomobject]@{ Code = $LASTEXITCODE; Out = (($out | ForEach-Object { "$_" }) -join "`n") }
