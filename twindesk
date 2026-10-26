@@ -1,0 +1,1003 @@
+#!/usr/bin/env bash
+# twindesk - run several Claude Desktop accounts side by side.
+# Each profile is the official app launched with its own --user-data-dir.
+# Not affiliated with Anthropic. MIT licensed.
+#
+# Compatible with Bash 3.2 (macOS system bash). No dependency beyond system tools.
+
+set -euo pipefail
+
+TWINDESK_VERSION="0.1.0"
+
+# Claude Desktop versions this release was tested against, per OS ("os|version|date").
+# Anything not listed here is reported as untested by `twindesk doctor`.
+TESTED_VERSIONS="macos|3.6556.2|2026-10-26"
+
+# Exit codes (documented in README).
+EXIT_OK=0
+EXIT_ERROR=1
+EXIT_USAGE=2
+EXIT_NO_APP=3
+EXIT_NO_PROFILE=4
+EXIT_TIMEOUT=5
+EXIT_INTERRUPTED=130
+
+# ----------------------------------------------------------------------------
+# Output
+# ----------------------------------------------------------------------------
+
+DRY_RUN=0
+ASSUME_YES=0
+JSON=0
+
+use_color() {
+  [ -z "${NO_COLOR:-}" ] && [ -t "${1:-1}" ]
+}
+
+_paint() { # code text fd
+  if use_color "$3"; then printf '\033[%sm%s\033[0m' "$1" "$2"; else printf '%s' "$2"; fi
+}
+
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '%s %s\n' "$(_paint 32 'ok' 1)" "$*"; }
+info() { printf '%s %s\n' "$(_paint 36 '->' 1)" "$*"; }
+warn() { printf '%s %s\n' "$(_paint 33 'warning:' 2)" "$*" >&2; }
+err()  { printf '%s %s\n' "$(_paint 31 'error:' 2)" "$*" >&2; }
+
+die() { # code message...
+  local code="$1"; shift
+  err "$*"
+  exit "$code"
+}
+
+dry() { printf '%s %s\n' "$(_paint 35 '[dry-run]' 1)" "$*"; }
+
+# JSON string escaping without jq.
+json_str() {
+  local s="$1" out="" c i
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  case "$s" in
+    *[$'\001'-$'\037']*)
+      # Rare: other control characters, escape them one by one.
+      for ((i = 0; i < ${#s}; i++)); do
+        c="${s:i:1}"
+        case "$c" in
+          [$'\001'-$'\037']) out="$out$(printf '\\u%04x' "'$c")" ;;
+          *) out="$out$c" ;;
+        esac
+      done
+      s="$out"
+      ;;
+  esac
+  printf '"%s"' "$s"
+}
+
+json_bool() { if [ "$1" = "yes" ]; then printf 'true'; elif [ "$1" = "no" ]; then printf 'false'; else printf 'null'; fi; }
+json_num()  { if [ -n "$1" ]; then printf '%s' "$1"; else printf 'null'; fi; }
+
+# ----------------------------------------------------------------------------
+# Confirmation
+# ----------------------------------------------------------------------------
+
+confirm() { # question -> 0 if yes
+  if [ "$ASSUME_YES" = 1 ]; then return 0; fi
+  if [ "$DRY_RUN" = 1 ]; then dry "would ask: $1"; return 0; fi
+  if [ ! -t 0 ]; then
+    die "$EXIT_USAGE" "confirmation needed but stdin is not a terminal: re-run with --yes"
+  fi
+  local answer
+  printf '%s [y/N] ' "$1" >&2
+  read -r answer || answer=""
+  case "$answer" in y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
+}
+
+# ----------------------------------------------------------------------------
+# Platform, paths, names
+# ----------------------------------------------------------------------------
+
+detect_os() {
+  if [ -n "${TWINDESK_OS:-}" ]; then printf '%s' "$TWINDESK_OS"; return; fi
+  case "$(uname -s)" in
+    Darwin) printf 'macos' ;;
+    Linux)  printf 'linux' ;;
+    *)      printf 'unsupported' ;;
+  esac
+}
+
+OS="$(detect_os)"
+
+os_status() { # tested | experimental
+  case "$OS" in
+    macos) printf 'tested' ;;
+    *)     printf 'experimental' ;;
+  esac
+}
+
+default_root() {
+  case "$OS" in
+    macos) printf '%s' "$HOME/Library/Application Support/twindesk" ;;
+    *)     printf '%s' "${XDG_DATA_HOME:-$HOME/.local/share}/twindesk" ;;
+  esac
+}
+
+# Main Claude Desktop data folders. twindesk never reads, writes or deletes them:
+# they are only used by the guards below to refuse any path that touches them.
+main_data_dirs() {
+  printf '%s\n' "$HOME/Library/Application Support/Claude"
+  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/Claude"
+}
+
+ROOT="${TWINDESK_HOME:-$(default_root)}"
+PROFILES_DIR="$ROOT/profiles"
+CLI_DIR="$ROOT/cli"
+
+# Resolve a path without requiring it to exist (resolves the deepest existing parent).
+resolve_path() {
+  local p="$1" rest="" base
+  while [ ! -e "$p" ] && [ "$p" != "/" ] && [ -n "$p" ]; do
+    base="$(basename "$p")"
+    rest="/$base$rest"
+    p="$(dirname "$p")"
+  done
+  if [ -d "$p" ]; then
+    p="$(cd -P "$p" && pwd -P)"
+  else
+    p="$(cd -P "$(dirname "$p")" && pwd -P)/$(basename "$p")"
+  fi
+  p="${p%/}$rest"
+  printf '%s' "${p:-/}"
+}
+
+check_root() {
+  case "$ROOT" in
+    /*) ;;
+    *) die "$EXIT_USAGE" "data root must be an absolute path: $ROOT" ;;
+  esac
+  if [ "$(basename "$ROOT")" != "twindesk" ]; then
+    die "$EXIT_USAGE" "data root must be a folder named 'twindesk': $ROOT"
+  fi
+  local real d
+  real="$(resolve_path "$ROOT")"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    d="$(resolve_path "$d")"
+    case "$real/" in
+      "$d"/*) die "$EXIT_USAGE" "data root is inside the main Claude data folder, refusing: $ROOT" ;;
+    esac
+    case "$d/" in
+      "$real"/*) die "$EXIT_USAGE" "data root contains the main Claude data folder, refusing: $ROOT" ;;
+    esac
+  done <<EOF
+$(main_data_dirs)
+EOF
+}
+
+NAME_RE='^[a-z0-9][a-z0-9-]{0,31}$'
+
+name_ok() {
+  local LC_ALL=C
+  [[ $1 =~ $NAME_RE ]]
+}
+
+validate_name() {
+  local n="${1:-}"
+  if [ -z "$n" ]; then die "$EXIT_USAGE" "missing profile name"; fi
+  if ! name_ok "$n"; then
+    die "$EXIT_USAGE" "invalid profile name '$n': use 1-32 chars, lowercase letters, digits and '-', not starting with '-'"
+  fi
+  case "$n" in
+    default|main) die "$EXIT_USAGE" "'$n' is reserved" ;;
+  esac
+}
+
+profile_dir() { printf '%s' "$PROFILES_DIR/$1"; }
+cli_dir()     { printf '%s' "$CLI_DIR/$1"; }
+
+require_profile() {
+  validate_name "$1"
+  [ -d "$(profile_dir "$1")" ] || die "$EXIT_NO_PROFILE" "profile '$1' not found (create it with: twindesk add $1)"
+}
+
+# Delete a profile folder. Only <root>/profiles/<name> or <root>/cli/<name>,
+# resolved and checked, never a symlink, never outside the root.
+safe_remove_dir() { # path kind(profiles|cli) name
+  local path="$1" kind="$2" name="$3" real expected
+  validate_name "$name"
+  check_root
+  expected="$(resolve_path "$ROOT")/$kind/$name"
+  if [ -L "$path" ]; then die "$EXIT_ERROR" "refusing to delete a symlink: $path"; fi
+  [ -e "$path" ] || return 0
+  real="$(resolve_path "$path")"
+  if [ "$real" != "$expected" ]; then
+    die "$EXIT_ERROR" "refusing to delete '$path': resolves to '$real', expected '$expected'"
+  fi
+  if [ "$DRY_RUN" = 1 ]; then dry "would delete $real"; return 0; fi
+  rm -rf -- "$real"
+}
+
+# ----------------------------------------------------------------------------
+# App detection
+# ----------------------------------------------------------------------------
+
+APP=""      # what we launch: .app bundle on macOS, executable on Linux
+APP_EXE=""  # executable that appears in the process list
+
+find_app() {
+  local c
+  if [ -n "${TWINDESK_APP:-}" ]; then
+    APP="$TWINDESK_APP"
+  else
+    case "$OS" in
+      macos)
+        for c in "/Applications/Claude.app" "$HOME/Applications/Claude.app"; do
+          if [ -x "$c/Contents/MacOS/Claude" ]; then APP="$c"; break; fi
+        done
+        ;;
+      linux)
+        # Official package (apt) and the main community build both provide `claude-desktop`.
+        c="$(command -v claude-desktop 2>/dev/null || true)"
+        [ -n "$c" ] && APP="$c"
+        ;;
+    esac
+  fi
+  if [ -z "$APP" ]; then return 1; fi
+  case "$OS" in
+    macos)
+      APP_EXE="$APP/Contents/MacOS/Claude"
+      [ -x "$APP_EXE" ] || return 1
+      ;;
+    *)
+      [ -x "$APP" ] || return 1
+      APP_EXE="$APP"
+      ;;
+  esac
+  return 0
+}
+
+require_app() {
+  find_app || die "$EXIT_NO_APP" "Claude Desktop not found (set TWINDESK_APP to its path)"
+}
+
+app_version() {
+  case "$OS" in
+    macos) defaults read "$APP/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || true ;;
+    linux) dpkg-query -W -f='${Version}' claude-desktop 2>/dev/null || true ;;
+  esac
+}
+
+tested_version_for_os() {
+  local line
+  for line in $TESTED_VERSIONS; do
+    case "$line" in "$OS|"*) line="${line#*|}"; printf '%s' "${line%%|*}"; return ;; esac
+  done
+}
+
+# Compare dotted numeric versions: prints -1, 0 or 1.
+version_cmp() {
+  local a="$1" b="$2" x y
+  while [ -n "$a" ] || [ -n "$b" ]; do
+    x="${a%%.*}"; y="${b%%.*}"
+    case "$a" in *.*) a="${a#*.}" ;; *) a="" ;; esac
+    case "$b" in *.*) b="${b#*.}" ;; *) b="" ;; esac
+    x="${x%%[!0-9]*}"; y="${y%%[!0-9]*}"
+    x="${x:-0}"; y="${y:-0}"
+    if [ "$((10#$x))" -lt "$((10#$y))" ]; then printf -- '-1'; return; fi
+    if [ "$((10#$x))" -gt "$((10#$y))" ]; then printf '1'; return; fi
+  done
+  printf '0'
+}
+
+# ----------------------------------------------------------------------------
+# Processes: always by PID, identified by command line
+# ----------------------------------------------------------------------------
+
+# One line per process: "<pid> <full command line>".
+ps_snapshot() {
+  if [ -n "${TWINDESK_PS_FIXTURE:-}" ]; then cat "$TWINDESK_PS_FIXTURE"; return; fi
+  ps -A -ww -o pid= -o args= 2>/dev/null || true
+}
+
+# Strip the app executable from the front of a command line. Prints the
+# remaining arguments (possibly empty) and returns 0 when the line belongs
+# to the app's main executable. Scripts show up as "<interpreter> <script> ...",
+# so a single leading shell interpreter is tolerated.
+strip_exe() { # args exe
+  local a="$1" exe="$2"
+  case "$a" in
+    /bin/sh\ *|/bin/bash\ *|/usr/bin/bash\ *|/usr/bin/env\ bash\ *)
+      case "$a" in "/usr/bin/env bash "*) a="${a#/usr/bin/env bash }" ;; *) a="${a#* }" ;; esac ;;
+  esac
+  if [ "$a" = "$exe" ]; then printf ''; return 0; fi
+  case "$a" in
+    "$exe "*) printf '%s' "${a#"$exe" }"; return 0 ;;
+  esac
+  return 1
+}
+
+# Classify a command line: prints "main", "profile" (+ path on next field) or nothing.
+# - main instance: app executable with no --user-data-dir argument
+# - profile instance: app executable launched with --user-data-dir=<path>
+# - helpers (--type=...) are never instances
+classify() { # args exe
+  local rest
+  rest="$(strip_exe "$1" "$2")" || return 0
+  case " $rest " in *" --type="*) return 0 ;; esac
+  case " $rest" in
+    *" --user-data-dir="*) printf 'profile' ;;
+    *) printf 'main' ;;
+  esac
+}
+
+# PIDs of the main instance (normally one).
+main_pids() {
+  local pid args
+  while read -r pid args; do
+    [ -n "$pid" ] || continue
+    if [ "$(classify "$args" "$APP_EXE")" = "main" ]; then printf '%s\n' "$pid"; fi
+  done <<EOF
+$(ps_snapshot)
+EOF
+}
+
+# PID of the instance running a given profile folder. The folder must be the
+# exact --user-data-dir value (twindesk always passes it as the only argument).
+profile_pid() { # name
+  local want pid args rest
+  want="--user-data-dir=$(profile_dir "$1")"
+  while read -r pid args; do
+    [ -n "$pid" ] || continue
+    rest="$(strip_exe "$args" "$APP_EXE")" || continue
+    case "$rest" in
+      "$want"|"$want --"*) printf '%s\n' "$pid"; return 0 ;;
+    esac
+  done <<EOF
+$(ps_snapshot)
+EOF
+  return 0
+}
+
+pid_alive() { kill -0 "$1" 2>/dev/null; }
+
+pid_args() { ps -o args= -p "$1" 2>/dev/null || true; }
+
+# Stop exactly one PID with TERM, wait, verify. KILL only as a last resort,
+# after the delay and an explicit confirmation.
+stop_pid() { # pid label expect(main|profile:<name>)
+  local pid="$1" label="$2" expect="$3" args waited=0 limit="${TWINDESK_STOP_TIMEOUT:-20}"
+  # Re-check what the PID is right before signalling it (PIDs can be reused).
+  args="$(pid_args "$pid")"
+  case "$expect" in
+    main) [ "$(classify "$args" "$APP_EXE")" = "main" ] || die "$EXIT_ERROR" "PID $pid is no longer the main instance, not touching it" ;;
+    profile:*)
+      [ "$(profile_pid "${expect#profile:}")" = "$pid" ] || die "$EXIT_ERROR" "PID $pid is no longer profile '${expect#profile:}', not touching it" ;;
+  esac
+  if [ "$DRY_RUN" = 1 ]; then dry "would send TERM to $label (PID $pid)"; return 0; fi
+  kill -TERM "$pid" 2>/dev/null || true
+  while pid_alive "$pid" && [ "$waited" -lt "$limit" ]; do sleep 1; waited=$((waited + 1)); done
+  if pid_alive "$pid"; then
+    warn "$label (PID $pid) still running after ${limit}s"
+    if confirm "Force quit $label (PID $pid)? Unsaved work in it will be lost."; then
+      kill -KILL "$pid" 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+  if pid_alive "$pid"; then die "$EXIT_ERROR" "$label (PID $pid) did not stop"; fi
+  ok "$label stopped (PID $pid)"
+}
+
+wait_for_pid() { # function-name arg timeout -> prints pid
+  local fn="$1" arg="$2" limit="$3" waited=0 pid=""
+  while [ "$waited" -lt "$limit" ]; do
+    pid="$("$fn" "$arg" | head -n 1)"
+    if [ -n "$pid" ]; then printf '%s' "$pid"; return 0; fi
+    sleep 1; waited=$((waited + 1))
+  done
+  return 1
+}
+
+main_pid_any() { main_pids | head -n 1; }
+
+launch_main() {
+  if [ "$DRY_RUN" = 1 ]; then dry "would start the main instance"; return 0; fi
+  case "$OS" in
+    macos) open -n -a "$APP" ;;
+    *) start_detached "$APP_EXE" ;;
+  esac
+}
+
+launch_profile() { # name
+  local arg
+  arg="--user-data-dir=$(profile_dir "$1")"
+  if [ "$DRY_RUN" = 1 ]; then dry "would start profile '$1' with $arg"; return 0; fi
+  case "$OS" in
+    macos) open -n -a "$APP" --args "$arg" ;;
+    *) start_detached "$APP_EXE" "$arg" ;;
+  esac
+}
+
+start_detached() {
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" >/dev/null 2>&1 < /dev/null &
+  else
+    nohup "$@" >/dev/null 2>&1 < /dev/null &
+  fi
+}
+
+# Bring a window to the front by PID, never by app name.
+activate_pid() { # pid
+  local pid="$1" win
+  if [ "$DRY_RUN" = 1 ]; then dry "would bring PID $pid to the front"; return 0; fi
+  case "$OS" in
+    macos)
+      # NSRunningApplication targets the exact process and needs no automation permission.
+      if osascript -l JavaScript -e "ObjC.import('AppKit'); var a = \$.NSRunningApplication.runningApplicationWithProcessIdentifier($pid); a.isNil() ? 'missing' : (a.activateWithOptions(\$.NSApplicationActivateAllWindows) ? 'ok' : 'failed')" 2>/dev/null | grep -q '^ok$'; then
+        return 0
+      fi
+      osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1 && return 0
+      warn "could not bring PID $pid to the front"
+      return 1
+      ;;
+    *)
+      if command -v xdotool >/dev/null 2>&1; then
+        win="$(xdotool search --pid "$pid" 2>/dev/null | tail -n 1 || true)"
+        if [ -n "$win" ] && xdotool windowactivate "$win" >/dev/null 2>&1; then return 0; fi
+      fi
+      if command -v wmctrl >/dev/null 2>&1; then
+        win="$(wmctrl -lp 2>/dev/null | awk -v p="$pid" '$3 == p { print $1; exit }')"
+        if [ -n "$win" ] && wmctrl -ia "$win" >/dev/null 2>&1; then return 0; fi
+      fi
+      warn "could not bring PID $pid to the front (install xdotool or wmctrl; not possible on most Wayland sessions)"
+      return 1
+      ;;
+  esac
+}
+
+# ----------------------------------------------------------------------------
+# Profile state
+# ----------------------------------------------------------------------------
+
+# Signed in = the profile's own cookie store has a non-expired claude.ai
+# "sessionKey" row. Only the row count is read, never the value.
+# Prints yes, no or unknown.
+signed_in() { # name
+  local dir db uri now count
+  dir="$(profile_dir "$1")"
+  db=""
+  for db in "$dir/Cookies" "$dir/Network/Cookies"; do
+    [ -f "$db" ] && break
+    db=""
+  done
+  if [ -z "$db" ]; then printf 'no'; return; fi
+  if ! command -v sqlite3 >/dev/null 2>&1; then printf 'unknown'; return; fi
+  uri="$db"
+  uri=${uri//%/%25}; uri=${uri//\?/%3f}; uri=${uri//#/%23}
+  # Chromium time: microseconds since 1601-01-01.
+  now=$(( ($(date +%s) + 11644473600) * 1000000 ))
+  count="$(sqlite3 -readonly "file:$uri?immutable=1" \
+    "select count(*) from cookies where host_key in ('claude.ai','.claude.ai') and name='sessionKey' and (expires_utc=0 or expires_utc>$now);" 2>/dev/null || true)"
+  case "$count" in
+    ''|*[!0-9]*) printf 'unknown' ;;
+    0) printf 'no' ;;
+    *) printf 'yes' ;;
+  esac
+}
+
+dir_size_kb() { # path
+  if [ -d "$1" ]; then du -sk "$1" 2>/dev/null | awk '{print $1}'; else printf '0'; fi
+}
+
+human_kb() {
+  awk -v k="$1" 'BEGIN { if (k >= 1048576) printf "%.1f GB", k/1048576; else if (k >= 1024) printf "%.0f MB", k/1024; else printf "%d KB", k }'
+}
+
+list_profile_names() {
+  local d
+  [ -d "$PROFILES_DIR" ] || return 0
+  for d in "$PROFILES_DIR"/*; do
+    [ -d "$d" ] || continue
+    [ -L "$d" ] && continue
+    d="$(basename "$d")"
+    if name_ok "$d"; then printf '%s\n' "$d"; fi
+  done
+}
+
+# ----------------------------------------------------------------------------
+# Shortcuts
+# ----------------------------------------------------------------------------
+
+# Shortcuts live outside the data root (that is where the OS looks for them).
+# They carry a marker with the profile name, and are only ever deleted when
+# the marker matches.
+shortcut_path() { # name
+  case "$OS" in
+    macos) printf '%s' "$HOME/Applications/Claude ($1).app" ;;
+    *)     printf '%s' "${XDG_DATA_HOME:-$HOME/.local/share}/applications/twindesk-$1.desktop" ;;
+  esac
+}
+
+shortcut_marker_ok() { # path name
+  case "$OS" in
+    macos) [ "$(cat "$1/Contents/Resources/twindesk-profile" 2>/dev/null || true)" = "$2" ] ;;
+    *)     grep -qx "X-Twindesk-Profile=$2" "$1" 2>/dev/null ;;
+  esac
+}
+
+create_shortcut() { # name
+  local name="$1" path src
+  path="$(shortcut_path "$name")"
+  if [ -e "$path" ]; then
+    shortcut_marker_ok "$path" "$name" || die "$EXIT_ERROR" "'$path' exists and was not created by twindesk"
+  fi
+  if [ "$DRY_RUN" = 1 ]; then dry "would create shortcut $path"; return 0; fi
+  case "$OS" in
+    macos)
+      command -v osacompile >/dev/null 2>&1 || die "$EXIT_ERROR" "osacompile not found"
+      mkdir -p "$HOME/Applications"
+      src="$(mktemp "${TMPDIR:-/tmp}/twindesk.XXXXXX")"
+      # The launcher only runs `open` on the official app with the profile folder.
+      # A second launch of a running profile is handed over to it by the app itself.
+      printf 'do shell script "open -n -a " & quoted form of "%s" & " --args " & quoted form of "--user-data-dir=%s"\n' \
+        "$(as_escape "$APP")" "$(as_escape "$(profile_dir "$name")")" > "$src"
+      [ -e "$path" ] && rm -rf -- "$path"
+      osacompile -o "$path" "$src" >/dev/null
+      rm -f -- "$src"
+      printf '%s' "$name" > "$path/Contents/Resources/twindesk-profile"
+      ;;
+    *)
+      mkdir -p "$(dirname "$path")"
+      {
+        printf '[Desktop Entry]\nType=Application\nName=Claude (%s)\n' "$name"
+        printf 'Exec=%s %s\n' "$(desktop_escape "$APP_EXE")" "$(desktop_escape "--user-data-dir=$(profile_dir "$name")")"
+        printf 'Icon=claude-desktop\nTerminal=false\nCategories=Network;\nX-Twindesk-Profile=%s\n' "$name"
+      } > "$path"
+      ;;
+  esac
+  ok "shortcut created: $path"
+}
+
+as_escape() { local s="$1"; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '%s' "$s"; }
+
+desktop_escape() { # quote an Exec argument per the Desktop Entry spec
+  local s="$1"
+  s=${s//\\/\\\\\\\\}; s=${s//\"/\\\\\"}; s=${s//\`/\\\\\`}; s=${s//\$/\\\\\$}; s=${s//%/%%}
+  printf '"%s"' "$s"
+}
+
+remove_shortcut() { # name
+  local name="$1" path
+  path="$(shortcut_path "$name")"
+  [ -e "$path" ] || return 0
+  if [ -L "$path" ] || ! shortcut_marker_ok "$path" "$name"; then
+    warn "not deleting '$path': not created by twindesk"
+    return 0
+  fi
+  if [ "$DRY_RUN" = 1 ]; then dry "would delete shortcut $path"; return 0; fi
+  rm -rf -- "$path"
+  ok "shortcut removed: $path"
+}
+
+# ----------------------------------------------------------------------------
+# claude:// handler (read-only)
+# ----------------------------------------------------------------------------
+
+url_handler() {
+  case "$OS" in
+    macos)
+      osascript -l JavaScript -e 'ObjC.import("AppKit"); var u = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL($.NSURL.URLWithString("claude://x")); u.isNil() ? "" : u.path.js' 2>/dev/null || true ;;
+    *)
+      xdg-mime query default x-scheme-handler/claude 2>/dev/null || true ;;
+  esac
+}
+
+# ----------------------------------------------------------------------------
+# Commands
+# ----------------------------------------------------------------------------
+
+cmd_add() { # name
+  local name="$1" dir
+  validate_name "$name"
+  check_root
+  dir="$(profile_dir "$name")"
+  [ -e "$dir" ] && die "$EXIT_ERROR" "profile '$name' already exists"
+  if [ "$DRY_RUN" = 1 ]; then dry "would create $dir"; return 0; fi
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  ok "profile '$name' created: $dir"
+  say "Next: twindesk login $name"
+}
+
+cmd_list() {
+  local name pid si kb first=1 cli
+  require_app
+  if [ "$JSON" = 1 ]; then
+    printf '['
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      pid="$(profile_pid "$name")"; si="$(signed_in "$name")"; kb="$(dir_size_kb "$(profile_dir "$name")")"
+      cli=no; [ -d "$(cli_dir "$name")" ] && cli=yes
+      [ "$first" = 1 ] || printf ','
+      first=0
+      printf '{"name":%s,"running":%s,"pid":%s,"signed_in":%s,"size_kb":%s,"cli_profile":%s,"path":%s}' \
+        "$(json_str "$name")" "$( [ -n "$pid" ] && printf true || printf false)" "$(json_num "$pid")" \
+        "$(json_bool "$si")" "$(json_num "$kb")" "$(json_bool "$cli")" "$(json_str "$(profile_dir "$name")")"
+    done <<EOF
+$(list_profile_names)
+EOF
+    printf ']\n'
+    return 0
+  fi
+  if [ -z "$(list_profile_names)" ]; then say "No profiles yet. Create one with: twindesk add <name>"; return 0; fi
+  printf '%-20s %-18s %-10s %-9s %s\n' "PROFILE" "STATE" "SIGNED IN" "SIZE" "CLI"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    pid="$(profile_pid "$name")"; si="$(signed_in "$name")"; kb="$(dir_size_kb "$(profile_dir "$name")")"
+    cli=no; [ -d "$(cli_dir "$name")" ] && cli=yes
+    printf '%-20s %-18s %-10s %-9s %s\n' "$name" "$( [ -n "$pid" ] && printf 'running (%s)' "$pid" || printf 'stopped')" "$si" "$(human_kb "$kb")" "$cli"
+  done <<EOF
+$(list_profile_names)
+EOF
+}
+
+cmd_open() { # name
+  local name="$1" pid
+  require_app
+  require_profile "$name"
+  pid="$(profile_pid "$name")"
+  if [ -n "$pid" ]; then
+    info "profile '$name' is running (PID $pid), bringing it to the front"
+    activate_pid "$pid" || true
+    return 0
+  fi
+  launch_profile "$name"
+  [ "$DRY_RUN" = 1 ] && return 0
+  pid="$(wait_for_pid profile_pid "$name" 30)" || die "$EXIT_TIMEOUT" "profile '$name' did not start within 30s"
+  ok "profile '$name' started (PID $pid)"
+  if [ "$(signed_in "$name")" = "no" ]; then say "Not signed in yet: run 'twindesk login $name'."; fi
+}
+
+LOGIN_RESTORE_MAIN=0
+
+login_cleanup() {
+  if [ "$LOGIN_RESTORE_MAIN" = 1 ] && [ -z "$(main_pid_any)" ]; then
+    info "restarting the main instance"
+    launch_main || true
+  fi
+  LOGIN_RESTORE_MAIN=0
+}
+
+on_login_interrupt() {
+  printf '\n' >&2
+  warn "interrupted"
+  login_cleanup
+  exit "$EXIT_INTERRUPTED"
+}
+
+cmd_login() { # name timeout
+  local name="$1" timeout="$2" pid main elapsed=0 state
+  require_app
+  require_profile "$name"
+  if [ "$(signed_in "$name")" = "yes" ]; then ok "profile '$name' is already signed in"; return 0; fi
+  main="$(main_pid_any)"
+
+  say "Sign-in links (claude://) are always delivered to the main Claude instance,"
+  say "so it has to be closed while profile '$name' signs in."
+  if [ -n "$main" ]; then
+    warn "closing the main instance (PID $main) interrupts any Claude Code or Cowork session running in it."
+    confirm "Close the main instance now? It is restarted at the end." || die "$EXIT_ERROR" "cancelled"
+  fi
+  if [ "$DRY_RUN" = 1 ]; then
+    [ -n "$main" ] && dry "would stop the main instance (PID $main)"
+    dry "would start profile '$name', wait up to ${timeout}s for sign-in, then restart the main instance"
+    return 0
+  fi
+
+  trap on_login_interrupt INT TERM
+  if [ -n "$main" ]; then
+    LOGIN_RESTORE_MAIN=1
+    stop_pid "$main" "main instance" main
+  fi
+
+  pid="$(profile_pid "$name")"
+  if [ -z "$pid" ]; then
+    launch_profile "$name"
+    pid="$(wait_for_pid profile_pid "$name" 30)" || { login_cleanup; die "$EXIT_TIMEOUT" "profile '$name' did not start within 30s"; }
+  else
+    activate_pid "$pid" || true
+  fi
+  ok "profile '$name' is running (PID $pid)"
+  say ""
+  say "In the window of profile '$name':"
+  say "  1. Sign in (email link or Google)."
+  say "  2. When the browser asks to open Claude, accept."
+  say "Waiting up to ${timeout}s. Press Ctrl+C to cancel (the main instance is restarted)."
+
+  while :; do
+    state="$(signed_in "$name")"
+    if [ "$state" = "yes" ]; then break; fi
+    main="$(main_pid_any)"
+    if [ -n "$main" ]; then
+      warn "the main instance restarted by itself (PID $main), closing it again."
+      stop_pid "$main" "main instance" main
+      warn "if you already clicked the link, it went to the wrong instance: click 'Open Claude' in the browser again now."
+    fi
+    if [ -z "$(profile_pid "$name")" ]; then
+      login_cleanup
+      die "$EXIT_ERROR" "profile '$name' was closed before signing in"
+    fi
+    if [ "$elapsed" -ge "$timeout" ]; then
+      login_cleanup
+      die "$EXIT_TIMEOUT" "not signed in after ${timeout}s"
+    fi
+    sleep 2; elapsed=$((elapsed + 2))
+  done
+  ok "profile '$name' is signed in"
+
+  local restore="$LOGIN_RESTORE_MAIN"
+  login_cleanup
+  trap - INT TERM
+  if [ "$restore" = 1 ]; then
+    main="$(wait_for_pid main_pid_any x 30 || true)"
+    if [ -n "$main" ]; then ok "main instance running again (PID $main)"; else warn "main instance did not come back within 30s"; fi
+  else
+    say "main instance left stopped (it was not running before)"
+  fi
+  pid="$(profile_pid "$name")"
+  [ -n "$pid" ] && ok "profile '$name' running (PID $pid), signed in: $(signed_in "$name")"
+}
+
+cmd_status() { # [name]
+  local name="${1:-}" main handler ver tested p
+  require_app
+  main="$(main_pids | tr '\n' ' ' | sed 's/ *$//')"
+  handler="$(url_handler)"
+  ver="$(app_version)"
+  tested="$(tested_version_for_os)"
+  if [ -n "$name" ]; then require_profile "$name"; fi
+  if [ "$JSON" = 1 ]; then
+    printf '{"version":%s,"os":%s,"os_status":%s,"app":%s,"app_version":%s,"tested_version":%s,"main_pids":[%s],"claude_url_handler":%s,"root":%s,"profiles":' \
+      "$(json_str "$TWINDESK_VERSION")" "$(json_str "$OS")" "$(json_str "$(os_status)")" "$(json_str "$APP")" \
+      "$(json_str "$ver")" "$(json_str "$tested")" "$(printf '%s' "$main" | tr ' ' ',')" "$(json_str "$handler")" "$(json_str "$ROOT")"
+    if [ -n "$name" ]; then
+      p="$(profile_pid "$name")"
+      printf '[{"name":%s,"pid":%s,"signed_in":%s}]}\n' "$(json_str "$name")" "$(json_num "$p")" "$(json_bool "$(signed_in "$name")")"
+    else
+      JSON=1 cmd_list | sed 's/$/}/'
+    fi
+    return 0
+  fi
+  say "twindesk $TWINDESK_VERSION on $OS ($(os_status))"
+  say "app:              $APP ${ver:+(version $ver)}"
+  say "main instance:    ${main:-not running}"
+  say "claude:// opens:  ${handler:-unknown}"
+  say "data root:        $ROOT"
+  if [ -n "$name" ]; then
+    p="$(profile_pid "$name")"
+    say "profile $name:    $( [ -n "$p" ] && printf 'running (PID %s)' "$p" || printf 'stopped'), signed in: $(signed_in "$name")"
+  else
+    say ""
+    cmd_list
+  fi
+}
+
+cmd_shortcut() { # name
+  require_app
+  require_profile "$1"
+  create_shortcut "$1"
+}
+
+find_cli() {
+  if [ -n "${TWINDESK_CLAUDE_CLI:-}" ]; then printf '%s' "$TWINDESK_CLAUDE_CLI"; return 0; fi
+  command -v claude 2>/dev/null
+}
+
+cmd_cli() { # name args...
+  local name="$1" cli dir
+  shift
+  validate_name "$name"
+  check_root
+  cli="$(find_cli)" || die "$EXIT_NO_APP" "Claude Code CLI ('claude') not found in PATH"
+  dir="$(cli_dir "$name")"
+  if [ "$DRY_RUN" = 1 ]; then dry "would run: CLAUDE_CONFIG_DIR=$dir $cli $*"; return 0; fi
+  if [ ! -d "$dir" ]; then mkdir -p "$dir"; chmod 700 "$dir"; info "CLI profile '$name' created: $dir"; fi
+  CLAUDE_CONFIG_DIR="$dir" exec "$cli" "$@"
+}
+
+sh_quote() { local s="$1"; s=${s//\'/\'\\\'\'}; printf "'%s'" "$s"; }
+
+cmd_alias() { # name
+  local name="$1"
+  validate_name "$name"
+  say "# Add to your shell config (twindesk never edits it):"
+  say "alias claude-$name=$(sh_quote "CLAUDE_CONFIG_DIR=$(sh_quote "$(cli_dir "$name")") claude")"
+  say "alias claude-desktop-$name=$(sh_quote "twindesk open $name")"
+}
+
+cmd_remove() { # name all
+  local name="$1" all="$2" pid cli dir clidir
+  validate_name "$name"
+  check_root
+  dir="$(profile_dir "$name")"; clidir="$(cli_dir "$name")"
+  if [ ! -d "$dir" ] && [ ! -d "$clidir" ]; then die "$EXIT_NO_PROFILE" "profile '$name' not found"; fi
+  if [ "$all" = 1 ]; then ASSUME_YES=1; fi
+  if [ -d "$dir" ]; then
+    confirm "Delete Desktop profile '$name' ($dir) and its shortcut? Its sign-in and local sessions are lost." || die "$EXIT_ERROR" "cancelled"
+    if find_app; then
+      pid="$(profile_pid "$name")"
+      [ -n "$pid" ] && stop_pid "$pid" "profile '$name'" "profile:$name"
+      remove_shortcut "$name"
+    fi
+    safe_remove_dir "$dir" profiles "$name"
+    [ "$DRY_RUN" = 1 ] || ok "Desktop profile '$name' deleted"
+  fi
+  if [ -d "$clidir" ]; then
+    if confirm "Also delete CLI profile '$name' ($clidir)?"; then
+      # Sign out first so the CLI removes its own stored credential; twindesk never touches the keychain itself.
+      if cli="$(find_cli)"; then
+        if [ "$DRY_RUN" = 1 ]; then dry "would run: CLAUDE_CONFIG_DIR=$clidir $cli auth logout"
+        else CLAUDE_CONFIG_DIR="$clidir" "$cli" auth logout >/dev/null 2>&1 || warn "CLI sign-out failed; its stored credential may remain"
+        fi
+      else
+        warn "Claude Code CLI not found: its stored credential for this profile may remain"
+      fi
+      safe_remove_dir "$clidir" cli "$name"
+      [ "$DRY_RUN" = 1 ] || ok "CLI profile '$name' deleted"
+    else
+      say "CLI profile kept: $clidir"
+    fi
+  fi
+}
+
+cmd_doctor() {
+  local problems=0 ver tested handler main c
+  say "twindesk $TWINDESK_VERSION"
+  case "$OS" in
+    macos) ok "OS: macOS $(sw_vers -productVersion 2>/dev/null || true) (tested)" ;;
+    linux) warn "OS: Linux - experimental, untested"; ;;
+    *) err "OS: unsupported ($(uname -s))"; problems=$((problems + 1)) ;;
+  esac
+  if find_app; then
+    ok "app: $APP"
+    ver="$(app_version)"; tested="$(tested_version_for_os)"
+    if [ -z "$ver" ]; then warn "app version: unknown"
+    elif [ -z "$tested" ]; then warn "app version $ver: untested on this OS"
+    else
+      case "$(version_cmp "$ver" "$tested")" in
+        0) ok "app version $ver (tested)" ;;
+        1) warn "app version $ver: untested version (newer than tested $tested). If something breaks, report it." ;;
+        *) warn "app version $ver: older than tested $tested. Fix: update Claude Desktop." ;;
+      esac
+    fi
+    if [ -n "$tested" ]; then ok "--user-data-dir: verified on $OS with $tested"; else warn "--user-data-dir: experimental - untested on $OS"; fi
+    main="$(main_pids | tr '\n' ' ')"
+    if [ -n "${main// /}" ]; then ok "main instance running: PID $main"; else say "   main instance: not running"; fi
+    while IFS= read -r c; do
+      [ -n "$c" ] || continue
+      say "   profile $c: $( p="$(profile_pid "$c")"; [ -n "$p" ] && printf 'running (PID %s)' "$p" || printf 'stopped'), signed in: $(signed_in "$c")"
+    done <<EOF
+$(list_profile_names)
+EOF
+  else
+    err "app: Claude Desktop not found. Fix: install it, or set TWINDESK_APP to its path."
+    problems=$((problems + 1))
+  fi
+  handler="$(url_handler)"
+  if [ -z "$handler" ]; then warn "claude:// handler: unknown"
+  elif [ -n "$APP" ] && [ "$handler" != "$APP" ] && [ "$OS" = macos ]; then
+    warn "claude:// opens $handler, not $APP. Sign-in links may go to another app. Fix: remove other apps claiming claude://."
+    problems=$((problems + 1))
+  else ok "claude:// handler: $handler (links always reach the main instance: use 'twindesk login')"
+  fi
+  if command -v sqlite3 >/dev/null 2>&1; then ok "sqlite3 found (sign-in detection)"
+  else warn "sqlite3 not found: sign-in state shows 'unknown'. Fix: install sqlite3."; fi
+  if [ "$OS" = macos ] && ! command -v osacompile >/dev/null 2>&1; then warn "osacompile not found: 'shortcut' unavailable"; fi
+  if [ "$OS" = linux ] && ! command -v xdotool >/dev/null 2>&1 && ! command -v wmctrl >/dev/null 2>&1; then
+    warn "neither xdotool nor wmctrl found: 'open' cannot focus a running profile. Fix: install one (X11 only)."
+  fi
+  if mkdir -p "$ROOT" 2>/dev/null && [ -w "$ROOT" ]; then ok "data root writable: $ROOT"
+  else err "data root not writable: $ROOT. Fix: check permissions or set TWINDESK_HOME."; problems=$((problems + 1)); fi
+  if command -v claude >/dev/null 2>&1; then ok "Claude Code CLI: $(command -v claude)"; else say "   Claude Code CLI: not found ('twindesk cli' unavailable)"; fi
+  if [ "$problems" -gt 0 ]; then err "$problems problem(s) found"; return "$EXIT_ERROR"; fi
+  ok "no problems found"
+}
+
+usage() {
+  cat <<EOF
+twindesk $TWINDESK_VERSION - run several Claude Desktop accounts side by side
+
+Usage: twindesk <command> [options]
+
+Commands:
+  add <profile>              create a profile
+  list [--json]              list profiles: running, PID, signed in, size
+  open <profile>             start a profile, or bring it to the front
+  login <profile>            guided sign-in (closes the main instance meanwhile)
+                             [--timeout <seconds>] (default 300)
+  status [profile] [--json]  diagnostic
+  shortcut <profile>         create a launcher for the profile
+  cli <profile> [args...]    run Claude Code CLI with the profile's own config
+  alias <profile>            print shell aliases to copy (nothing is written)
+  remove <profile> [--all]   stop and delete a profile and its shortcut
+  doctor                     check the setup
+  help                       show this help
+
+Options:
+  --dry-run   show what would change, change nothing
+  --yes, -y   answer yes to confirmations
+  --version   print version
+
+Profile names: 1-32 chars, a-z 0-9 and '-'; 'default' and 'main' are reserved.
+Exit codes: 0 ok, 1 error, 2 usage, 3 app not found, 4 profile not found,
+            5 timeout, 130 interrupted.
+Not affiliated with Anthropic.
+EOF
+}
+
+main() {
+  local cmd="" timeout=300 all=0 a
+  local -a pos=()
+  [ $# -gt 0 ] || { usage; exit "$EXIT_USAGE"; }
+  cmd="$1"; shift
+  case "$cmd" in
+    -h|--help|help) usage; exit "$EXIT_OK" ;;
+    --version|-V|version) say "twindesk $TWINDESK_VERSION"; exit "$EXIT_OK" ;;
+  esac
+  if [ "$cmd" = "cli" ]; then
+    # Everything after the profile name goes to Claude Code untouched.
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --dry-run) DRY_RUN=1; shift ;;
+        *) break ;;
+      esac
+    done
+    [ $# -gt 0 ] || die "$EXIT_USAGE" "usage: twindesk cli <profile> [args...]"
+    a="$1"; shift
+    cmd_cli "$a" "$@"
+    exit "$EXIT_OK"
+  fi
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1 ;;
+      --yes|-y) ASSUME_YES=1 ;;
+      --json) JSON=1 ;;
+      --all) all=1 ;;
+      --timeout)
+        [ $# -ge 2 ] || die "$EXIT_USAGE" "--timeout needs a value"
+        timeout="$2"; shift ;;
+      --timeout=*) timeout="${1#--timeout=}" ;;
+      --) shift; while [ $# -gt 0 ]; do pos+=("$1"); shift; done; break ;;
+      -*) die "$EXIT_USAGE" "unknown option: $1" ;;
+      *) pos+=("$1") ;;
+    esac
+    shift
+  done
+  case "$timeout" in ''|*[!0-9]*) die "$EXIT_USAGE" "--timeout must be a number of seconds" ;; esac
+  [ "${#pos[@]}" -le 1 ] || die "$EXIT_USAGE" "too many arguments"
+  a="${pos[0]:-}"
+
+  case "$cmd" in
+    add|open|login|shortcut|alias|remove)
+      [ -n "$a" ] || die "$EXIT_USAGE" "usage: twindesk $cmd <profile>" ;;
+    list|doctor)
+      [ -z "$a" ] || die "$EXIT_USAGE" "twindesk $cmd takes no profile" ;;
+  esac
+  case "$cmd" in
+    add) cmd_add "$a" ;;
+    list) cmd_list ;;
+    open) cmd_open "$a" ;;
+    login) cmd_login "$a" "$timeout" ;;
+    status) cmd_status "$a" ;;
+    shortcut) cmd_shortcut "$a" ;;
+    alias) cmd_alias "$a" ;;
+    remove) cmd_remove "$a" "$all" ;;
+    doctor) cmd_doctor ;;
+    *) err "unknown command: $cmd"; usage >&2; exit "$EXIT_USAGE" ;;
+  esac
+}
+
+if [ "${TWINDESK_SOURCE_ONLY:-0}" != 1 ]; then
+  main "$@"
+fi
