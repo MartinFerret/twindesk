@@ -332,13 +332,13 @@ function Get-MainPid {
 # duplicate: the app does not stop a second instance on the same folder, and two
 # instances writing one profile can corrupt it.
 function Get-ProfilePidAll([string]$Name) {
-    $want = Get-ProfileDir $Name
+    $want = (Get-ProfileDir $Name).Replace('\', '/').TrimEnd('/')
     foreach ($p in Get-ProcessSnapshot) {
         if ((Get-InstanceKind $p) -ne 'profile') { continue }
         $argv = Split-CommandLine $p.CommandLine
         foreach ($a in @($argv | Select-Object -Skip 1)) {
             if ($a.StartsWith('--user-data-dir=')) {
-                $v = $a.Substring(16).TrimEnd('\', '/')
+                $v = $a.Substring(16).Replace('\', '/').TrimEnd('/')
                 if ($v -ieq $want) { $p.Pid }
             }
         }

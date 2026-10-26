@@ -34,7 +34,13 @@ cd twindesk
 
 No sudo, no admin rights, no `curl | bash`. The installer copies one script to `~/.local/bin` (or `%LOCALAPPDATA%\twindesk\bin`) and tells you how to add it to your `PATH`; it does not edit your shell config.
 
-Requirements: Claude Desktop installed, and `sqlite3` to detect sign-in (preinstalled on macOS).
+Requirements: Claude Desktop installed, and `sqlite3` to detect sign-in:
+
+- macOS: preinstalled.
+- Debian/Ubuntu: `sudo apt install sqlite3` (the one step that needs sudo, and it is apt's, not twindesk's).
+- Windows: `winget install SQLite.SQLite`, then make sure `sqlite3.exe` is in your `PATH` (not verified on a real machine).
+
+Without it everything works, but `list` shows the sign-in state as `unknown` and `login` cannot tell when you are signed in.
 
 ## Quick start
 

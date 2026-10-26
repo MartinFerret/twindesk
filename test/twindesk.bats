@@ -438,3 +438,12 @@ EOF
   grep -qx "Name=Claude (Client A)" "$f"
   grep -qx "X-Twindesk-Profile=work" "$f"
 }
+
+@test "first_line never fails under pipefail, even with long output" {
+  fn first_line seq 1 200000
+  [ "$status" -eq 0 ]
+  [ "$output" = 1 ]
+  fn first_line true
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}

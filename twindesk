@@ -368,7 +368,11 @@ EOF
   return 0
 }
 
-profile_pid() { profile_pids "$1" | head -n 1; }
+# First line of a command's output. Not `| head -n 1`: with pipefail, head
+# closing the pipe early can make the whole pipeline fail (SIGPIPE).
+first_line() { local out; out="$("$@")"; [ -z "$out" ] || printf '%s\n' "${out%%$'\n'*}"; }
+
+profile_pid() { first_line profile_pids "$1"; }
 
 profile_pid_count() { profile_pids "$1" | grep -c . || true; }
 
@@ -408,14 +412,14 @@ stop_pid() { # pid label expect(main|profile:<name>)
 wait_for_pid() { # function-name arg timeout -> prints pid
   local fn="$1" arg="$2" limit="$3" waited=0 pid=""
   while [ "$waited" -lt "$limit" ]; do
-    pid="$("$fn" "$arg" | head -n 1)"
+    pid="$(first_line "$fn" "$arg")"
     if [ -n "$pid" ]; then printf '%s' "$pid"; return 0; fi
     sleep 1; waited=$((waited + 1))
   done
   return 1
 }
 
-main_pid_any() { main_pids | head -n 1; }
+main_pid_any() { first_line main_pids; }
 
 launch_main() {
   if [ "$DRY_RUN" = 1 ]; then dry "would start the main instance"; return 0; fi
