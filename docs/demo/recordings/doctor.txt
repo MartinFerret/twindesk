@@ -1,0 +1,13 @@
+$ twindesk doctor
+twindesk 0.1.0
+ok OS: macOS 26.2 (tested)
+ok app: /Applications/Claude.app
+ok app version 3.6556.2 (tested)
+ok --user-data-dir: verified on macos with 3.6556.2
+ok main instance running: PID 53537
+   profile work: running (PID 54289), signed in: yes
+ok claude:// handler: /Applications/Claude.app (a sign-in link reaches only one running instance: use 'twindesk login')
+ok sqlite3 found (sign-in detection)
+ok data root writable: /Users/you/Library/Application Support/twindesk
+ok Claude Code CLI: /Users/you/.local/bin/claude
+ok no problems found

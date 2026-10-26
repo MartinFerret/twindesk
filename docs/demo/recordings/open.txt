@@ -1,0 +1,2 @@
+$ twindesk open work
+-> profile 'work' is running (PID 54289), bringing it to the front

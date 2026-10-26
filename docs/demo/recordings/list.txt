@@ -1,0 +1,3 @@
+$ twindesk list
+PROFILE              STATE              SIGNED IN  SIZE      CLI
+work                 running (54289)    yes        59 MB     yes

@@ -1,0 +1,21 @@
+{
+  "name": "twindesk-demo",
+  "private": true,
+  "description": "Renders docs/demo.gif from real twindesk output recorded on macOS.",
+  "scripts": {
+    "data": "node make-data.mjs",
+    "studio": "remotion studio src/index.ts",
+    "render": "node make-data.mjs && remotion render src/index.ts Demo out/demo.mp4 && ffmpeg -y -i out/demo.mp4 -vf \"fps=15,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle\" ../demo.gif"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.535",
+    "@remotion/google-fonts": "4.0.535",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.535"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "typescript": "5.6.3"
+  }
+}

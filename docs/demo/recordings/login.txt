@@ -1,0 +1,19 @@
+$ twindesk login work
+A sign-in link (claude://) reaches only one running Claude instance, usually not
+the one signing in, so every other instance is closed while profile 'work' signs in.
+To close: main instance (PID 45147), profile 'compte2' (PID 85452).
+warning: closing an instance interrupts any Claude Code or Cowork session running in it.
+ok main instance stopped (PID 45147)
+ok profile 'compte2' stopped (PID 85452)
+ok profile 'work' is running (PID 38221)
+
+In the window of profile 'work':
+  1. Sign in (email link or Google).
+  2. When the browser asks to open Claude, accept.
+Waiting up to 300s. Press Ctrl+C to cancel (closed instances are restarted).
+ok profile 'work' is signed in
+-> restarting the main instance
+-> restarting profile 'compte2'
+ok main instance running again (PID 23893)
+ok profile 'compte2' running again (PID 24638)
+ok profile 'work' running (PID 38221), signed in: yes

@@ -1,0 +1,3 @@
+$ twindesk add work
+ok profile 'work' created: /Users/you/Library/Application Support/twindesk/profiles/work
+Next: twindesk login work
