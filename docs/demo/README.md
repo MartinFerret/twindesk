@@ -11,3 +11,5 @@ To render again (needs Node 18+ and ffmpeg):
 npm ci
 npm run render
 ```
+
+`docs/social-preview.png` (the GitHub social preview, 1280x640) comes from the `Social` still: `npm run social`. Its terminal lines are also taken from `recordings/login.txt`.

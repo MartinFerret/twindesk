@@ -5,6 +5,7 @@
   "scripts": {
     "data": "node make-data.mjs",
     "studio": "remotion studio src/index.ts",
+    "social": "node make-data.mjs && remotion still src/index.ts Social ../social-preview.png",
     "render": "node make-data.mjs && remotion render src/index.ts Demo out/demo.mp4 && ffmpeg -y -i out/demo.mp4 -vf \"fps=15,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle\" ../demo.gif"
   },
   "dependencies": {
