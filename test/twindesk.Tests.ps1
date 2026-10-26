@@ -285,7 +285,11 @@ Describe 'twindesk' {
     Describe 'shortcut label' {
         It 'validates the label and only accepts it for shortcut' {
             Invoke-Td @('add', 'work') | Out-Null
-            foreach ($l in @('', '../x', 'toolongtoolong', 'a"b', '-x')) {
+            $bad = @('', '../x', 'toolongtoolong', '-x')
+            # Windows PowerShell 5.1 strips embedded quotes from native command
+            # arguments, so 'a"b' would arrive as the valid label 'ab'.
+            if ($PSVersionTable.PSVersion.Major -ge 6) { $bad += 'a"b' }
+            foreach ($l in $bad) {
                 (Invoke-Td @('shortcut', 'work', '--label', $l)).Code | Should -Be 2
             }
             $r = Invoke-Td @('open', 'work', '--label', '2')
