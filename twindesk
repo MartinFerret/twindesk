@@ -894,7 +894,7 @@ cmd_doctor() {
       esac
     fi
     if [ -n "$tested" ]; then ok "--user-data-dir: verified on $OS with $tested"; else warn "--user-data-dir: experimental - untested on $OS"; fi
-    main="$(main_pids | tr '\n' ' ')"
+    main="$(main_pids | tr '\n' ' ' | sed 's/ *$//')"
     if [ -n "${main// /}" ]; then ok "main instance running: PID $main"; else say "   main instance: not running"; fi
     while IFS= read -r c; do
       [ -n "$c" ] || continue
