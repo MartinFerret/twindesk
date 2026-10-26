@@ -19,7 +19,7 @@ It also gives you a separate Claude Code CLI sign-in per profile, which needs no
 macOS and Linux:
 
 ```sh
-git clone https://github.com/<user>/twindesk.git
+git clone https://github.com/MartinFerret/twindesk.git
 cd twindesk
 ./install.sh
 ```
@@ -27,7 +27,7 @@ cd twindesk
 Windows (experimental, see [Support](#support)):
 
 ```powershell
-git clone https://github.com/<user>/twindesk.git
+git clone https://github.com/MartinFerret/twindesk.git
 cd twindesk
 .\install.ps1
 ```
