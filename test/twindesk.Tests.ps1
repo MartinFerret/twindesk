@@ -111,6 +111,15 @@ Describe 'twindesk' {
             [void](Find-App)
             @(Get-MainPid) | Should -Be @(101)
         }
+        It 'reports every instance on one profile, so duplicates can be flagged' {
+            $exe = Join-Path $script:Tmp 'local/AnthropicClaude/app-1.2.3/claude.exe'
+            $dir = Join-Path $env:TWINDESK_HOME 'profiles/dup'
+            Add-Content -LiteralPath $env:TWINDESK_PS_FIXTURE -Value @("707`t$exe`t`"$exe`" `"--user-data-dir=$dir`"", "808`t$exe`t`"$exe`" `"--user-data-dir=$dir`"")
+            . $script:LoadTd
+            [void](Find-App)
+            @(Get-ProfilePidAll 'dup') | Should -Be @(707, 808)
+            Get-ProfilePid 'dup' | Should -Be 707
+        }
         It 'splits Windows command lines like CommandLineToArgvW' {
             . $script:LoadTd
             $a = Split-CommandLine '"C:\Program Files\x.exe" "--user-data-dir=C:\a b\c" -x "q\"uote" back\\slash'

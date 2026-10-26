@@ -8,6 +8,8 @@
 set -euo pipefail
 
 TWINDESK_VERSION="0.1.0"
+# Absolute path of this script, used by shortcuts to call `twindesk open`.
+TWINDESK_SELF="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 
 # Claude Desktop versions this release was tested against, per OS ("os|version|date").
 # Anything not listed here is reported as untested by `twindesk doctor`.
@@ -346,7 +348,11 @@ EOF
 
 # PID of the instance running a given profile folder. The folder must be the
 # exact --user-data-dir value (twindesk always passes it as the only argument).
-profile_pid() { # name
+# PIDs of every instance running a given profile folder. The folder must be the
+# exact --user-data-dir value (twindesk always passes it as the only argument).
+# More than one means a duplicate: the app does not stop a second instance on
+# the same folder, and two instances writing one profile can corrupt it.
+profile_pids() { # name
   local want pid args rest
   [ -n "$APP_EXE" ] || return 0
   want="--user-data-dir=$(profile_dir "$1")"
@@ -354,13 +360,17 @@ profile_pid() { # name
     [ -n "$pid" ] || continue
     rest="$(strip_exe "$args" "$APP_EXE")" || continue
     case "$rest" in
-      "$want"|"$want --"*) printf '%s\n' "$pid"; return 0 ;;
+      "$want"|"$want --"*) printf '%s\n' "$pid" ;;
     esac
   done <<EOF
 $(ps_snapshot)
 EOF
   return 0
 }
+
+profile_pid() { profile_pids "$1" | head -n 1; }
+
+profile_pid_count() { profile_pids "$1" | grep -c . || true; }
 
 pid_alive() { kill -0 "$1" 2>/dev/null; }
 
@@ -541,17 +551,20 @@ create_shortcut() { # name
     shortcut_marker_ok "$path" "$name" || die "$EXIT_ERROR" "'$path' exists and was not created by twindesk"
   fi
   if [ "$DRY_RUN" = 1 ]; then dry "would create shortcut $path"; return 0; fi
+  # The launcher runs `twindesk open`, which focuses a running profile by PID
+  # instead of starting a second instance on the same folder.
+  local cmd
+  cmd="TWINDESK_HOME=$(sh_quote "$ROOT")"
+  [ -n "${TWINDESK_APP:-}" ] && cmd="$cmd TWINDESK_APP=$(sh_quote "$TWINDESK_APP")"
+  cmd="$cmd /bin/bash $(sh_quote "$TWINDESK_SELF") open $name"
   case "$OS" in
     macos)
       command -v osacompile >/dev/null 2>&1 || die "$EXIT_ERROR" "osacompile not found"
       mkdir -p "$HOME/Applications"
       src="$(mktemp "${TMPDIR:-/tmp}/twindesk.XXXXXX")"
-      # The launcher only runs `open` on the official app with the profile folder.
-      # A second launch of a running profile is handed over to it by the app itself.
-      printf 'do shell script "open -n -a " & quoted form of "%s" & " --args " & quoted form of "--user-data-dir=%s"\n' \
-        "$(as_escape "$APP")" "$(as_escape "$(profile_dir "$name")")" > "$src"
+      printf 'do shell script "%s"\n' "$(as_escape "$cmd")" > "$src"
       [ -e "$path" ] && rm -rf -- "$path"
-      osacompile -o "$path" "$src" >/dev/null
+      osacompile -o "$path" "$src" >/dev/null 2>&1
       rm -f -- "$src"
       printf '%s' "$name" > "$path/Contents/Resources/twindesk-profile"
       ;;
@@ -559,7 +572,7 @@ create_shortcut() { # name
       mkdir -p "$(dirname "$path")"
       {
         printf '[Desktop Entry]\nType=Application\nName=Claude (%s)\n' "$name"
-        printf 'Exec=%s %s\n' "$(desktop_escape "$APP_EXE")" "$(desktop_escape "--user-data-dir=$(profile_dir "$name")")"
+        printf 'Exec=/bin/sh -c %s\n' "$(desktop_escape "$cmd")"
         printf 'Icon=claude-desktop\nTerminal=false\nCategories=Network;\nX-Twindesk-Profile=%s\n' "$name"
       } > "$path"
       ;;
@@ -655,6 +668,7 @@ EOF
     [ -n "$name" ] || continue
     profile_row "$name"
     if [ "$ROW_DESKTOP" = yes ]; then
+      [ "$(profile_pid_count "$name")" -gt 1 ] && warn "profile '$name' runs in several instances ($(profile_pids "$name" | tr '\n' ' ' | sed 's/ *$//')): this can corrupt it"
       printf '%-20s %-18s %-10s %-9s %s\n' "$name" "$( [ -n "$ROW_PID" ] && printf 'running (%s)' "$ROW_PID" || printf 'stopped')" "$ROW_SI" "$(human_kb "$ROW_KB")" "$ROW_CLI"
     else
       printf '%-20s %-18s %-10s %-9s %s\n' "$name" "(CLI only)" "-" "-" "$ROW_CLI"
@@ -669,6 +683,9 @@ cmd_open() { # name
   require_app
   require_profile "$name"
   pid="$(profile_pid "$name")"
+  if [ "$(profile_pid_count "$name")" -gt 1 ]; then
+    warn "profile '$name' runs in several instances ($(profile_pids "$name" | tr '\n' ' ' | sed 's/ *$//')): this can corrupt it. Quit the extra windows."
+  fi
   if [ -n "$pid" ]; then
     info "profile '$name' is running (PID $pid), bringing it to the front"
     activate_pid "$pid" || true
@@ -979,6 +996,10 @@ cmd_doctor() {
     while IFS= read -r c; do
       [ -n "$c" ] || continue
       has_desktop "$c" || continue
+      if [ "$(profile_pid_count "$c")" -gt 1 ]; then
+        err "profile $c runs in several instances ($(profile_pids "$c" | tr '\n' ' ' | sed 's/ *$//')). Fix: quit the extra ones; two instances on one profile can corrupt it."
+        problems=$((problems + 1))
+      fi
       say "   profile $c: $( p="$(profile_pid "$c")"; [ -n "$p" ] && printf 'running (PID %s)' "$p" || printf 'stopped'), signed in: $(signed_in "$c")"
     done <<EOF
 $(list_profile_names)

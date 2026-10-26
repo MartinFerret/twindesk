@@ -277,7 +277,10 @@ EOF
   [ "$status" -eq 0 ]
   local f="$HOME/.local/share/applications/twindesk-work.desktop"
   grep -qx "X-Twindesk-Profile=work" "$f"
-  grep -q -- "--user-data-dir=" "$f"
+  # The launcher goes through `twindesk open`, never straight to the app,
+  # so a running profile is focused instead of started twice.
+  grep -q '^Exec=/bin/sh -c ".*twindesk.* open work"$' "$f"
+  ! grep -q -- "--user-data-dir=" "$f"
   td remove work --yes
   [ ! -e "$f" ]
 }
@@ -390,4 +393,27 @@ EOF
   [[ "$output" == *"not managed by twindesk"* ]]
   kill -0 "$foreign"
   kill -TERM "$foreign"
+}
+
+@test "the shortcut command focuses a running profile instead of starting a second one" {
+  td add work
+  td shortcut work
+  local f="$HOME/.local/share/applications/twindesk-work.desktop" cmd
+  cmd="$(sed -n 's/^Exec=\/bin\/sh -c "\(.*\)"$/\1/p' "$f")"
+  [ -n "$cmd" ]
+  /bin/sh -c "$cmd" >/dev/null 2>&1
+  [ "$(fake_pids | wc -l | tr -d ' ')" = 1 ]
+  /bin/sh -c "$cmd" >/dev/null 2>&1
+  [ "$(fake_pids | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "list, open and doctor flag two instances on one profile" {
+  local exe=/Applications/Claude.app/Contents/MacOS/Claude root="$HOME/Library/Application Support/twindesk"
+  export TWINDESK_OS=macos TWINDESK_HOME="$root" TWINDESK_PS_FIXTURE="$BATS_TEST_TMPDIR/ps"
+  mkdir -p "$root/profiles/work"
+  printf '  11 %s --user-data-dir=%s\n  12 %s --user-data-dir=%s\n' "$exe" "$root/profiles/work" "$exe" "$root/profiles/work" > "$TWINDESK_PS_FIXTURE"
+  fn eval "APP_EXE='$exe'; profile_pid_count work"
+  [ "$output" = 2 ]
+  fn eval "APP_EXE='$exe'; profile_pid work"
+  [ "$output" = 11 ]
 }

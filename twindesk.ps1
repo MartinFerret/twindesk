@@ -328,7 +328,10 @@ function Get-MainPid {
     foreach ($p in Get-ProcessSnapshot) { if ((Get-InstanceKind $p) -eq 'main') { $p.Pid } }
 }
 
-function Get-ProfilePid([string]$Name) {
+# PIDs of every instance running a given profile folder. More than one means a
+# duplicate: the app does not stop a second instance on the same folder, and two
+# instances writing one profile can corrupt it.
+function Get-ProfilePidAll([string]$Name) {
     $want = Get-ProfileDir $Name
     foreach ($p in Get-ProcessSnapshot) {
         if ((Get-InstanceKind $p) -ne 'profile') { continue }
@@ -336,12 +339,13 @@ function Get-ProfilePid([string]$Name) {
         foreach ($a in @($argv | Select-Object -Skip 1)) {
             if ($a.StartsWith('--user-data-dir=')) {
                 $v = $a.Substring(16).TrimEnd('\', '/')
-                if ($v -ieq $want) { return $p.Pid }
+                if ($v -ieq $want) { $p.Pid }
             }
         }
     }
-    return $null
 }
+
+function Get-ProfilePid([string]$Name) { return (@(Get-ProfilePidAll $Name) | Select-Object -First 1) }
 
 function Test-PidExpected([int]$ProcessId, [string]$Expect) {
     if ($Expect -eq 'main') { return (@(Get-MainPid) -contains $ProcessId) }
@@ -514,10 +518,13 @@ function New-ProfileShortcut([string]$Name) {
     }
     if ($script:DryRun) { Write-Dry "would create shortcut $path"; return }
     New-Item -ItemType Directory -Force -Path (Split-Path $path -Parent) | Out-Null
+    # The shortcut runs `twindesk open`, which focuses a running profile by PID
+    # instead of starting a second instance on the same folder.
     $sh = New-Object -ComObject WScript.Shell
     $lnk = $sh.CreateShortcut($path)
-    $lnk.TargetPath = $script:App
-    $lnk.Arguments = '"--user-data-dir=' + (Get-ProfileDir $Name) + '"'
+    $lnk.TargetPath = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    $lnk.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $PSCommandPath + '" open ' + $Name
+    $lnk.IconLocation = $script:App
     $lnk.Description = Get-ShortcutMarker $Name
     $lnk.Save()
     Write-Ok "shortcut created: $path"
@@ -591,6 +598,8 @@ function Invoke-List {
 function Invoke-Open([string]$Name) {
     Assert-App
     Assert-Profile $Name
+    $all = @(Get-ProfilePidAll $Name)
+    if ($all.Count -gt 1) { Write-Warn "profile '$Name' runs in several instances ($($all -join ' ')): this can corrupt it. Quit the extra windows." }
     $p = Get-ProfilePid $Name
     if ($p) {
         Write-Info "profile '$Name' is running (PID $p), bringing it to the front"
@@ -865,6 +874,11 @@ function Invoke-Doctor {
         if ($mains.Count) { Write-Ok "main instance running: PID $($mains -join ' ')" } else { Write-Say '   main instance: not running' }
         foreach ($n in Get-ProfileName) {
             if (-not (Test-HasDesktop $n)) { continue }
+            $all = @(Get-ProfilePidAll $n)
+            if ($all.Count -gt 1) {
+                Write-Err "profile $n runs in several instances ($($all -join ' ')). Fix: quit the extra ones; two instances on one profile can corrupt it."
+                $problems++
+            }
             $p = Get-ProfilePid $n
             Write-Say "   profile $($n): $(if ($p) { "running (PID $p)" } else { 'stopped' }), signed in: $(Get-SignedIn $n)"
         }
