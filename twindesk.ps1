@@ -888,7 +888,7 @@ function Invoke-Doctor {
         $problems++
     }
     $h = Get-UrlHandler
-    if ($h) { Write-Ok "claude:// handler: $h (links always reach the main instance: use 'twindesk login')" } else { Write-Warn 'claude:// handler: unknown' }
+    if ($h) { Write-Ok "claude:// handler: $h (a sign-in link reaches only one running instance: use 'twindesk login')" } else { Write-Warn 'claude:// handler: unknown' }
     if (Get-Command sqlite3 -ErrorAction SilentlyContinue) { Write-Ok 'sqlite3 found (sign-in detection)' }
     else { Write-Warn "sqlite3 not found: sign-in state shows 'unknown'. Fix: install sqlite3 and add it to PATH." }
     try {

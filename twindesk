@@ -1013,7 +1013,7 @@ EOF
   elif [ -n "$APP" ] && [ "$handler" != "$APP" ] && [ "$OS" = macos ]; then
     warn "claude:// opens $handler, not $APP. Sign-in links may go to another app. Fix: remove other apps claiming claude://."
     problems=$((problems + 1))
-  else ok "claude:// handler: $handler (links always reach the main instance: use 'twindesk login')"
+  else ok "claude:// handler: $handler (a sign-in link reaches only one running instance: use 'twindesk login')"
   fi
   if command -v sqlite3 >/dev/null 2>&1; then ok "sqlite3 found (sign-in detection)"
   else warn "sqlite3 not found: sign-in state shows 'unknown'. Fix: install sqlite3."; fi
