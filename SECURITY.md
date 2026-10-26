@@ -8,7 +8,8 @@ twindesk is a small shell script. This page lists everything it touches and ever
 |---|---|---|
 | Its own data folder | macOS `~/Library/Application Support/twindesk`, Linux `${XDG_DATA_HOME:-~/.local/share}/twindesk`, Windows `%LOCALAPPDATA%\twindesk` | `add`, `cli`, `remove` |
 | Claude Desktop processes | started with `--user-data-dir=<profile folder>`; closed by PID | `open`, `login`, `remove` |
-| A launcher per profile | macOS `~/Applications/Claude (<profile>).app`, Linux `~/.local/share/applications/twindesk-<profile>.desktop`, Windows Start menu `Claude (<profile>).lnk` | `shortcut`, deleted by `remove` |
+| A launcher per profile | macOS `~/Applications/Claude (<profile>).app` (built with `osacompile`, re-signed ad hoc after twindesk adds its marker and optional badge icon), Linux `~/.local/share/applications/twindesk-<profile>.desktop`, Windows Start menu `Claude (<profile or label>).lnk` | `shortcut`, deleted by `remove` |
+| Claude's icon, read-only | `Claude.app/Contents/Resources/<icon>.icns` | `shortcut --label` |
 | The profile's cookie store, read-only | `<profile folder>/Cookies` | `list`, `status`, `login`, `doctor` |
 | The installed command | `~/.local/bin/twindesk`, or `%LOCALAPPDATA%\twindesk\bin` | `install.sh`, `install.ps1` |
 
