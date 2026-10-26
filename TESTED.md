@@ -58,8 +58,13 @@ Two different Claude accounts: account 1 (paid) in the main instance, account 2 
 
 Run on 2026-10-26:
 
-- `bats`: 41 tests, all passing, with the script run by macOS `/bin/bash` 3.2.57.
+- `bats`: 42 tests, all passing, with the script run by macOS `/bin/bash` 3.2.57.
 - `Pester` 5.6.1 on PowerShell 7.4 (Linux container): 31 passing, 1 skipped (Windows-only `.lnk` test).
 - `ShellCheck` 0.10.0: no findings. `PSScriptAnalyzer` 1.22.0 (Error and Warning): no findings, with one rule excluded and justified in `PSScriptAnalyzerSettings.psd1`.
 
-CI runs the same suites on macOS, Ubuntu and Windows, including Windows PowerShell 5.1.
+GitHub Actions, run 40401364397 on 2026-10-26, all green:
+
+- Bash on `macos-latest` (script run by `/bin/bash` 3.2) and `ubuntu-latest`: ShellCheck clean, 42 bats tests passing.
+- PowerShell on `ubuntu-latest`, and on `windows-latest` with both PowerShell 7 and Windows PowerShell 5.1: PSScriptAnalyzer clean, 31 Pester tests passing, 1 skipped (`sqlite3` is not installed on the runner). On Windows this includes creating, relabelling and removing a real Start menu `.lnk`. It does not involve a real Claude Desktop install.
+
+CI found two bugs that local runs had missed: a random `SIGPIPE` failure when a profile ran twice (Bash), and path matching with mixed `/` and `\` (PowerShell).
