@@ -335,6 +335,7 @@ classify() { # args exe
 # PIDs of the main instance (normally one).
 main_pids() {
   local pid args
+  [ -n "$APP_EXE" ] || return 0
   while read -r pid args; do
     [ -n "$pid" ] || continue
     if [ "$(classify "$args" "$APP_EXE")" = "main" ]; then printf '%s\n' "$pid"; fi
@@ -347,6 +348,7 @@ EOF
 # exact --user-data-dir value (twindesk always passes it as the only argument).
 profile_pid() { # name
   local want pid args rest
+  [ -n "$APP_EXE" ] || return 0
   want="--user-data-dir=$(profile_dir "$1")"
   while read -r pid args; do
     [ -n "$pid" ] || continue
@@ -494,16 +496,18 @@ human_kb() {
   awk -v k="$1" 'BEGIN { if (k >= 1048576) printf "%.1f GB", k/1048576; else if (k >= 1024) printf "%.0f MB", k/1024; else printf "%d KB", k }'
 }
 
+# Names of Desktop profiles (profiles/<name>) and CLI-only profiles (cli/<name>).
 list_profile_names() {
   local d
-  [ -d "$PROFILES_DIR" ] || return 0
-  for d in "$PROFILES_DIR"/*; do
+  for d in "$PROFILES_DIR"/* "$CLI_DIR"/*; do
     [ -d "$d" ] || continue
     [ -L "$d" ] && continue
     d="$(basename "$d")"
     if name_ok "$d"; then printf '%s\n' "$d"; fi
-  done
+  done | sort -u
 }
+
+has_desktop() { [ -d "$(profile_dir "$1")" ] && [ ! -L "$(profile_dir "$1")" ]; }
 
 # ----------------------------------------------------------------------------
 # Shortcuts
@@ -610,20 +614,31 @@ cmd_add() { # name
   say "Next: twindesk login $name"
 }
 
+# Works without the app (profiles are then shown as stopped), so profiles can
+# still be listed and removed after Claude Desktop is uninstalled.
+profile_row() { # name -> sets ROW_* variables
+  ROW_DESKTOP=no; ROW_PID=""; ROW_SI=unknown; ROW_KB=0; ROW_CLI=no
+  if has_desktop "$1"; then
+    ROW_DESKTOP=yes
+    ROW_PID="$(profile_pid "$1")"; ROW_SI="$(signed_in "$1")"; ROW_KB="$(dir_size_kb "$(profile_dir "$1")")"
+  fi
+  [ -d "$(cli_dir "$1")" ] && ROW_CLI=yes
+  return 0
+}
+
 cmd_list() {
-  local name pid si kb first=1 cli
-  require_app
+  local name first=1
+  find_app || warn "Claude Desktop not found: running state unknown"
   if [ "$JSON" = 1 ]; then
     printf '['
     while IFS= read -r name; do
       [ -n "$name" ] || continue
-      pid="$(profile_pid "$name")"; si="$(signed_in "$name")"; kb="$(dir_size_kb "$(profile_dir "$name")")"
-      cli=no; [ -d "$(cli_dir "$name")" ] && cli=yes
+      profile_row "$name"
       [ "$first" = 1 ] || printf ','
       first=0
-      printf '{"name":%s,"running":%s,"pid":%s,"signed_in":%s,"size_kb":%s,"cli_profile":%s,"path":%s}' \
-        "$(json_str "$name")" "$( [ -n "$pid" ] && printf true || printf false)" "$(json_num "$pid")" \
-        "$(json_bool "$si")" "$(json_num "$kb")" "$(json_bool "$cli")" "$(json_str "$(profile_dir "$name")")"
+      printf '{"name":%s,"desktop_profile":%s,"running":%s,"pid":%s,"signed_in":%s,"size_kb":%s,"cli_profile":%s,"path":%s}' \
+        "$(json_str "$name")" "$(json_bool "$ROW_DESKTOP")" "$( [ -n "$ROW_PID" ] && printf true || printf false)" "$(json_num "$ROW_PID")" \
+        "$( [ "$ROW_DESKTOP" = yes ] && json_bool "$ROW_SI" || printf null)" "$(json_num "$ROW_KB")" "$(json_bool "$ROW_CLI")" "$(json_str "$(profile_dir "$name")")"
     done <<EOF
 $(list_profile_names)
 EOF
@@ -634,9 +649,12 @@ EOF
   printf '%-20s %-18s %-10s %-9s %s\n' "PROFILE" "STATE" "SIGNED IN" "SIZE" "CLI"
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    pid="$(profile_pid "$name")"; si="$(signed_in "$name")"; kb="$(dir_size_kb "$(profile_dir "$name")")"
-    cli=no; [ -d "$(cli_dir "$name")" ] && cli=yes
-    printf '%-20s %-18s %-10s %-9s %s\n' "$name" "$( [ -n "$pid" ] && printf 'running (%s)' "$pid" || printf 'stopped')" "$si" "$(human_kb "$kb")" "$cli"
+    profile_row "$name"
+    if [ "$ROW_DESKTOP" = yes ]; then
+      printf '%-20s %-18s %-10s %-9s %s\n' "$name" "$( [ -n "$ROW_PID" ] && printf 'running (%s)' "$ROW_PID" || printf 'stopped')" "$ROW_SI" "$(human_kb "$ROW_KB")" "$ROW_CLI"
+    else
+      printf '%-20s %-18s %-10s %-9s %s\n' "$name" "(CLI only)" "-" "-" "$ROW_CLI"
+    fi
   done <<EOF
 $(list_profile_names)
 EOF
@@ -876,6 +894,7 @@ cmd_doctor() {
     if [ -n "${main// /}" ]; then ok "main instance running: PID $main"; else say "   main instance: not running"; fi
     while IFS= read -r c; do
       [ -n "$c" ] || continue
+      has_desktop "$c" || continue
       say "   profile $c: $( p="$(profile_pid "$c")"; [ -n "$p" ] && printf 'running (PID %s)' "$p" || printf 'stopped'), signed in: $(signed_in "$c")"
     done <<EOF
 $(list_profile_names)

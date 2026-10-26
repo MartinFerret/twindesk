@@ -452,12 +452,38 @@ function Format-Kb([long]$Kb) {
     return "$Kb KB"
 }
 
+# Names of Desktop profiles (profiles/<name>) and CLI-only profiles (cli/<name>).
 function Get-ProfileName {
-    if (-not (Test-Path -LiteralPath $script:ProfilesDir)) { return }
-    foreach ($d in Get-ChildItem -LiteralPath $script:ProfilesDir -Directory -Force | Sort-Object Name) {
-        if ($d.PSObject.Properties['LinkType'] -and $d.LinkType) { continue }
-        if (Test-NameOk $d.Name) { $d.Name }
+    $names = @()
+    foreach ($base in @($script:ProfilesDir, $script:CliDir)) {
+        if (-not (Test-Path -LiteralPath $base)) { continue }
+        foreach ($d in Get-ChildItem -LiteralPath $base -Directory -Force) {
+            if ($d.PSObject.Properties['LinkType'] -and $d.LinkType) { continue }
+            if (Test-NameOk $d.Name) { $names += $d.Name }
+        }
     }
+    $names | Sort-Object -Unique
+}
+
+function Test-HasDesktop([string]$Name) {
+    $d = Get-ProfileDir $Name
+    if (-not (Test-Path -LiteralPath $d -PathType Container)) { return $false }
+    $i = Get-Item -LiteralPath $d -Force
+    return -not ($i.PSObject.Properties['LinkType'] -and $i.LinkType)
+}
+
+# Works without the app (profiles are then shown as stopped), so profiles can
+# still be listed and removed after Claude Desktop is uninstalled.
+function Get-ProfileRow([string]$Name) {
+    $row = [pscustomobject]@{ Desktop = 'no'; Pid = $null; SignedIn = 'unknown'; Kb = 0; Cli = 'no' }
+    if (Test-HasDesktop $Name) {
+        $row.Desktop = 'yes'
+        if ($script:App) { $row.Pid = Get-ProfilePid $Name }
+        $row.SignedIn = Get-SignedIn $Name
+        $row.Kb = Get-DirSizeKb (Get-ProfileDir $Name)
+    }
+    if (Test-Path -LiteralPath (Get-CliProfileDir $Name)) { $row.Cli = 'yes' }
+    return $row
 }
 
 # ---------------------------------------------------------------------------
@@ -534,27 +560,29 @@ function Invoke-Add([string]$Name) {
 function Get-ListJson {
     $items = @()
     foreach ($n in Get-ProfileName) {
-        $p = Get-ProfilePid $n
-        $cli = if (Test-Path -LiteralPath (Get-CliProfileDir $n)) { 'yes' } else { 'no' }
-        $running = if ($p) { 'true' } else { 'false' }
-        $items += ('{{"name":{0},"running":{1},"pid":{2},"signed_in":{3},"size_kb":{4},"cli_profile":{5},"path":{6}}}' -f
-            (ConvertTo-JsonString $n), $running, (ConvertTo-JsonNum $p), (ConvertTo-JsonBool (Get-SignedIn $n)),
-            (Get-DirSizeKb (Get-ProfileDir $n)), (ConvertTo-JsonBool $cli), (ConvertTo-JsonString (Get-ProfileDir $n)))
+        $r = Get-ProfileRow $n
+        $running = if ($r.Pid) { 'true' } else { 'false' }
+        $si = if ($r.Desktop -eq 'yes') { ConvertTo-JsonBool $r.SignedIn } else { 'null' }
+        $items += ('{{"name":{0},"desktop_profile":{1},"running":{2},"pid":{3},"signed_in":{4},"size_kb":{5},"cli_profile":{6},"path":{7}}}' -f
+            (ConvertTo-JsonString $n), (ConvertTo-JsonBool $r.Desktop), $running, (ConvertTo-JsonNum $r.Pid), $si,
+            $r.Kb, (ConvertTo-JsonBool $r.Cli), (ConvertTo-JsonString (Get-ProfileDir $n)))
     }
     return '[' + ($items -join ',') + ']'
 }
 
 function Invoke-List {
-    Assert-App
+    if (-not $script:App -and -not (Find-App)) { Write-Warn 'Claude Desktop not found: running state unknown' }
     if ($script:Json) { Write-Say (Get-ListJson); return }
     $names = @(Get-ProfileName)
     if ($names.Count -eq 0) { Write-Say 'No profiles yet. Create one with: twindesk add <name>'; return }
     Write-Say ('{0,-20} {1,-18} {2,-10} {3,-9} {4}' -f 'PROFILE', 'STATE', 'SIGNED IN', 'SIZE', 'CLI')
     foreach ($n in $names) {
-        $p = Get-ProfilePid $n
-        $state = if ($p) { "running ($p)" } else { 'stopped' }
-        $cli = if (Test-Path -LiteralPath (Get-CliProfileDir $n)) { 'yes' } else { 'no' }
-        Write-Say ('{0,-20} {1,-18} {2,-10} {3,-9} {4}' -f $n, $state, (Get-SignedIn $n), (Format-Kb (Get-DirSizeKb (Get-ProfileDir $n))), $cli)
+        $r = Get-ProfileRow $n
+        if ($r.Desktop -eq 'yes') {
+            $state = if ($r.Pid) { "running ($($r.Pid))" } else { 'stopped' }
+            Write-Say ('{0,-20} {1,-18} {2,-10} {3,-9} {4}' -f $n, $state, $r.SignedIn, (Format-Kb $r.Kb), $r.Cli)
+        }
+        else { Write-Say ('{0,-20} {1,-18} {2,-10} {3,-9} {4}' -f $n, '(CLI only)', '-', '-', $r.Cli) }
     }
 }
 
@@ -769,6 +797,7 @@ function Invoke-Doctor {
         $mains = @(Get-MainPid)
         if ($mains.Count) { Write-Ok "main instance running: PID $($mains -join ' ')" } else { Write-Say '   main instance: not running' }
         foreach ($n in Get-ProfileName) {
+            if (-not (Test-HasDesktop $n)) { continue }
             $p = Get-ProfilePid $n
             Write-Say "   profile $($n): $(if ($p) { "running (PID $p)" } else { 'stopped' }), signed in: $(Get-SignedIn $n)"
         }

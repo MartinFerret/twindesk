@@ -310,7 +310,8 @@ EOF
 
 @test "missing app exits 3" {
   export TWINDESK_APP="$BATS_TEST_TMPDIR/nope"
-  td list
+  td add work
+  td open work
   [ "$status" -eq 3 ]
 }
 
@@ -342,4 +343,17 @@ EOF
 
 @test "script uses no Bash 4+ only features" {
   ! grep -nE 'declare -A|mapfile|readarray|\$\{[a-zA-Z_]+(,,|\^\^)|coproc|&>>|\|&' "$SCRIPT"
+}
+
+@test "list shows CLI-only profiles and works without the app" {
+  td add work
+  mkdir -p "$TWINDESK_HOME/cli/scripts"
+  export TWINDESK_APP="$BATS_TEST_TMPDIR/nope"
+  td list --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"name":"scripts","desktop_profile":false'* ]]
+  [[ "$output" == *'"name":"work","desktop_profile":true'* ]]
+  td remove scripts --yes
+  [ "$status" -eq 0 ]
+  [ ! -e "$TWINDESK_HOME/cli/scripts" ]
 }

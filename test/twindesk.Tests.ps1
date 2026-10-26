@@ -230,10 +230,23 @@ Describe 'twindesk' {
         }
     }
 
+    Describe 'list' {
+        It 'shows CLI-only profiles and works without the app' {
+            Invoke-Td @('add', 'work') | Out-Null
+            New-Item -ItemType Directory -Force -Path (Join-Path $env:TWINDESK_HOME 'cli/scripts') | Out-Null
+            $env:TWINDESK_APP = Join-Path $script:Tmp 'nope.exe'
+            $r = Invoke-Td @('list', '--json')
+            $r.Code | Should -Be 0
+            $r.Out | Should -Match '"name":"scripts","desktop_profile":false'
+            $r.Out | Should -Match '"name":"work","desktop_profile":true'
+        }
+    }
+
     Describe 'usage and misc' {
         It 'missing app exits 3' {
             $env:TWINDESK_APP = Join-Path $script:Tmp 'nope.exe'
-            (Invoke-Td @('list')).Code | Should -Be 3
+            Invoke-Td @('add', 'work') | Out-Null
+            (Invoke-Td @('open', 'work')).Code | Should -Be 3
         }
         It 'usage errors exit 2' {
             (Invoke-Td @()).Code | Should -Be 2
