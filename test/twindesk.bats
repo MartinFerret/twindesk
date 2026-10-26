@@ -417,3 +417,24 @@ EOF
   fn eval "APP_EXE='$exe'; profile_pid work"
   [ "$output" = 11 ]
 }
+
+@test "shortcut --label validates the label and only applies to shortcut" {
+  td add work
+  for l in "" "../x" "toolongtoolong" 'a"b' "-x"; do
+    td shortcut work --label "$l"
+    [ "$status" -eq 2 ]
+  done
+  td open work --label 2
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"only applies to 'shortcut'"* ]]
+  [ -z "$(fake_pids)" ]
+}
+
+@test "shortcut --label names the Linux launcher after the label" {
+  td add work
+  td shortcut work --label "Client A"
+  [ "$status" -eq 0 ]
+  local f="$HOME/.local/share/applications/twindesk-work.desktop"
+  grep -qx "Name=Claude (Client A)" "$f"
+  grep -qx "X-Twindesk-Profile=work" "$f"
+}

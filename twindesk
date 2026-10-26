@@ -544,8 +544,68 @@ shortcut_marker_ok() { # path name
   esac
 }
 
-create_shortcut() { # name
-  local name="$1" path src
+LABEL_RE='^[A-Za-z0-9][A-Za-z0-9 ._-]{0,11}$'
+
+validate_label() {
+  local LC_ALL=C
+  [[ $1 =~ $LABEL_RE ]] || die "$EXIT_USAGE" "invalid label '$1': 1-12 chars, letters, digits, space, '.', '_' or '-'"
+}
+
+# Draw the Claude icon with a badge holding <label> into an .icns file.
+# Uses AppKit through JXA and iconutil only. The app's icon is read, never changed.
+make_badged_icon() { # src.icns dest.icns label
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/twindesk.XXXXXX")"
+  mkdir "$tmp/icon.iconset"
+  osascript -l JavaScript - "$1" "$tmp/icon.iconset" "$3" >/dev/null 2>&1 <<'JXA' || { rm -rf -- "$tmp"; return 1; }
+ObjC.import('AppKit');
+function run(argv) {
+  var icon = $.NSImage.alloc.initWithContentsOfFile(argv[0]);
+  if (icon.isNil()) throw new Error('cannot read icon');
+  var label = $(argv[2]);
+  var specs = [[16, '16x16'], [32, '16x16@2x'], [32, '32x32'], [64, '32x32@2x'], [128, '128x128'], [256, '128x128@2x'],
+               [256, '256x256'], [512, '256x256@2x'], [512, '512x512'], [1024, '512x512@2x']];
+  specs.forEach(function (sp) {
+    var s = sp[0];
+    var rep = $.NSBitmapImageRep.alloc.initWithBitmapDataPlanesPixelsWidePixelsHighBitsPerSampleSamplesPerPixelHasAlphaIsPlanarColorSpaceNameBytesPerRowBitsPerPixel(
+      null, s, s, 8, 4, true, false, 'NSDeviceRGBColorSpace', 0, 0);
+    $.NSGraphicsContext.saveGraphicsState;
+    $.NSGraphicsContext.setCurrentContext($.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep));
+    icon.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, s, s), $.NSZeroRect, 2, 1.0);
+    if (s >= 32) {
+      var size = s * (argv[2].length <= 2 ? 0.34 : 0.24);
+      var attrs, tw, h, w;
+      do {
+        attrs = $.NSMutableDictionary.alloc.init;
+        attrs.setObjectForKey($.NSFont.boldSystemFontOfSize(size), $('NSFont')); // NSFontAttributeName
+        attrs.setObjectForKey($.NSColor.whiteColor, $('NSColor')); // NSForegroundColorAttributeName
+        tw = label.sizeWithAttributes(attrs).width;
+        h = size * 1.45;
+        w = Math.max(h, tw + size * 0.9);
+        if (w <= s * 0.94) break;
+        size *= 0.9;
+      } while (size > 4);
+      var x = s - w - s * 0.03, y = s * 0.03;
+      var pill = $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius($.NSMakeRect(x, y, w, h), h / 2, h / 2);
+      $.NSColor.colorWithSRGBRedGreenBlueAlpha(0.42, 0.26, 0.88, 1).setFill;
+      pill.fill;
+      $.NSColor.colorWithSRGBRedGreenBlueAlpha(1, 1, 1, 0.9).setStroke;
+      pill.lineWidth = Math.max(1, s / 128);
+      pill.stroke;
+      label.drawAtPointWithAttributes($.NSMakePoint(x + (w - tw) / 2, y + (h - size * 1.2) / 2), attrs);
+    }
+    $.NSGraphicsContext.restoreGraphicsState;
+    rep.representationUsingTypeProperties(4, $()).writeToFileAtomically(argv[1] + '/icon_' + sp[1] + '.png', true);
+  });
+  return 'ok';
+}
+JXA
+  iconutil -c icns "$tmp/icon.iconset" -o "$2" || { rm -rf -- "$tmp"; return 1; }
+  rm -rf -- "$tmp"
+}
+
+create_shortcut() { # name [label]
+  local name="$1" label="${2:-}" path src icon
   path="$(shortcut_path "$name")"
   if [ -e "$path" ]; then
     shortcut_marker_ok "$path" "$name" || die "$EXIT_ERROR" "'$path' exists and was not created by twindesk"
@@ -567,11 +627,29 @@ create_shortcut() { # name
       osacompile -o "$path" "$src" >/dev/null 2>&1
       rm -f -- "$src"
       printf '%s' "$name" > "$path/Contents/Resources/twindesk-profile"
+      if [ -n "$label" ]; then
+        icon="$(defaults read "$APP/Contents/Info.plist" CFBundleIconFile 2>/dev/null || true)"
+        case "$icon" in *.icns) ;; ?*) icon="$icon.icns" ;; esac
+        if [ -n "$icon" ] && [ -f "$APP/Contents/Resources/$icon" ]; then
+          if make_badged_icon "$APP/Contents/Resources/$icon" "$path/Contents/Resources/applet.icns" "$label"; then
+            # The applet's asset catalog would take precedence over applet.icns.
+            rm -f -- "$path/Contents/Resources/Assets.car"
+            /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$path/Contents/Info.plist" >/dev/null 2>&1 || true
+          else
+            warn "could not draw the badge: shortcut created without it"
+          fi
+        else
+          warn "Claude's icon not found: shortcut created without a badge"
+        fi
+      fi
+      # Re-seal our own launcher after adding files to it (never Claude.app).
+      codesign --force -s - "$path" >/dev/null 2>&1 || warn "could not re-sign $path"
+      touch "$path"
       ;;
     *)
       mkdir -p "$(dirname "$path")"
       {
-        printf '[Desktop Entry]\nType=Application\nName=Claude (%s)\n' "$name"
+        printf '[Desktop Entry]\nType=Application\nName=Claude (%s)\n' "${label:-$name}"
         printf 'Exec=/bin/sh -c %s\n' "$(desktop_escape "$cmd")"
         printf 'Icon=claude-desktop\nTerminal=false\nCategories=Network;\nX-Twindesk-Profile=%s\n' "$name"
       } > "$path"
@@ -902,10 +980,11 @@ cmd_status() { # [name]
   fi
 }
 
-cmd_shortcut() { # name
+cmd_shortcut() { # name [label]
   require_app
   require_profile "$1"
-  create_shortcut "$1"
+  [ -z "${2:-}" ] || validate_label "$2"
+  create_shortcut "$1" "${2:-}"
 }
 
 find_cli() {
@@ -1042,6 +1121,7 @@ Commands:
                              [--timeout <seconds>] (default 300)
   status [profile] [--json]  diagnostic
   shortcut <profile>         create a launcher for the profile
+                             [--label <text>] badge on the icon (macOS)
   cli <profile> [args...]    run Claude Code CLI with the profile's own config
   alias <profile>            print shell aliases to copy (nothing is written)
   remove <profile> [--all]   stop and delete a profile and its shortcut
@@ -1061,7 +1141,7 @@ EOF
 }
 
 main() {
-  local cmd="" timeout=300 all=0 a
+  local cmd="" timeout=300 all=0 a label="" has_label=0
   local -a pos=()
   [ $# -gt 0 ] || { usage; exit "$EXIT_USAGE"; }
   cmd="$1"; shift
@@ -1092,6 +1172,10 @@ main() {
         [ $# -ge 2 ] || die "$EXIT_USAGE" "--timeout needs a value"
         timeout="$2"; shift ;;
       --timeout=*) timeout="${1#--timeout=}" ;;
+      --label)
+        [ $# -ge 2 ] || die "$EXIT_USAGE" "--label needs a value"
+        label="$2"; has_label=1; shift ;;
+      --label=*) label="${1#--label=}"; has_label=1 ;;
       --) shift; while [ $# -gt 0 ]; do pos+=("$1"); shift; done; break ;;
       -*) die "$EXIT_USAGE" "unknown option: $1" ;;
       *) pos+=("$1") ;;
@@ -1101,6 +1185,10 @@ main() {
   case "$timeout" in ''|*[!0-9]*) die "$EXIT_USAGE" "--timeout must be a number of seconds" ;; esac
   [ "${#pos[@]}" -le 1 ] || die "$EXIT_USAGE" "too many arguments"
   a="${pos[0]:-}"
+  if [ "$has_label" = 1 ]; then
+    [ "$cmd" = shortcut ] || die "$EXIT_USAGE" "--label only applies to 'shortcut'"
+    validate_label "$label"
+  fi
 
   case "$cmd" in
     add|open|login|shortcut|alias|remove)
@@ -1114,7 +1202,7 @@ main() {
     open) cmd_open "$a" ;;
     login) cmd_login "$a" "$timeout" ;;
     status) cmd_status "$a" ;;
-    shortcut) cmd_shortcut "$a" ;;
+    shortcut) cmd_shortcut "$a" "$label" ;;
     alias) cmd_alias "$a" ;;
     remove) cmd_remove "$a" "$all" ;;
     doctor) cmd_doctor ;;

@@ -496,9 +496,21 @@ function Get-ProfileRow([string]$Name) {
 # Shortcuts (Start menu .lnk with a marker in its description)
 # ---------------------------------------------------------------------------
 
-function Get-ShortcutPath([string]$Name) {
+function Get-StartMenuDir {
     $base = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $HOME 'AppData/Roaming' }
-    return (Join-Path $base "Microsoft/Windows/Start Menu/Programs/Claude ($Name).lnk")
+    return (Join-Path $base 'Microsoft/Windows/Start Menu/Programs')
+}
+
+# The shortcut is named after the label when there is one, else the profile.
+function Get-ShortcutPath([string]$Name, [string]$Label = '') {
+    $shown = if ($Label) { $Label } else { $Name }
+    return (Join-Path (Get-StartMenuDir) "Claude ($shown).lnk")
+}
+
+function Assert-Label([string]$Label) {
+    if (-not [regex]::IsMatch($Label, '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,11}\z')) {
+        Exit-Twindesk $script:EXIT_USAGE "invalid label '$Label': 1-12 chars, letters, digits, space, '.', '_' or '-'"
+    }
 }
 
 function Get-ShortcutMarker([string]$Name) { return "twindesk-profile:$Name" }
@@ -511,13 +523,15 @@ function Test-ShortcutOwned([string]$Path, [string]$Name) {
     catch { return $false }
 }
 
-function New-ProfileShortcut([string]$Name) {
-    $path = Get-ShortcutPath $Name
+function New-ProfileShortcut([string]$Name, [string]$Label = '') {
+    $path = Get-ShortcutPath $Name $Label
     if ((Test-Path -LiteralPath $path) -and -not (Test-ShortcutOwned $path $Name)) {
         Exit-Twindesk $script:EXIT_ERROR "'$path' exists and was not created by twindesk"
     }
     if ($script:DryRun) { Write-Dry "would create shortcut $path"; return }
     New-Item -ItemType Directory -Force -Path (Split-Path $path -Parent) | Out-Null
+    # One shortcut per profile: drop a previous one that has another label.
+    Remove-ProfileShortcut $Name -Quiet
     # The shortcut runs `twindesk open`, which focuses a running profile by PID
     # instead of starting a second instance on the same folder.
     $sh = New-Object -ComObject WScript.Shell
@@ -530,13 +544,16 @@ function New-ProfileShortcut([string]$Name) {
     Write-Ok "shortcut created: $path"
 }
 
-function Remove-ProfileShortcut([string]$Name) {
-    $path = Get-ShortcutPath $Name
-    if (-not (Test-Path -LiteralPath $path)) { return }
-    if (-not (Test-ShortcutOwned $path $Name)) { Write-Warn "not deleting '$path': not created by twindesk"; return }
-    if ($script:DryRun) { Write-Dry "would delete shortcut $path"; return }
-    Remove-Item -LiteralPath $path -Force
-    Write-Ok "shortcut removed: $path"
+# Finds the profile's shortcut by its marker, whatever its label.
+function Remove-ProfileShortcut([string]$Name, [switch]$Quiet) {
+    $dir = Get-StartMenuDir
+    if (-not (Test-Path -LiteralPath $dir)) { return }
+    foreach ($f in Get-ChildItem -LiteralPath $dir -Filter 'Claude (*).lnk' -File -ErrorAction SilentlyContinue) {
+        if (-not (Test-ShortcutOwned $f.FullName $Name)) { continue }
+        if ($script:DryRun) { Write-Dry "would delete shortcut $($f.FullName)"; continue }
+        Remove-Item -LiteralPath $f.FullName -Force
+        if (-not $Quiet) { Write-Ok "shortcut removed: $($f.FullName)" }
+    }
 }
 
 # claude:// handler (read-only)
@@ -918,6 +935,7 @@ Commands:
                              [--timeout <seconds>] (default 300)
   status [profile] [--json]  diagnostic
   shortcut <profile>         create a launcher for the profile
+                             [--label <text>] badge on the icon (macOS)
   cli <profile> [args...]    run Claude Code CLI with the profile's own config
   alias <profile>            print shell aliases to copy (nothing is written)
   remove <profile> [--all]   stop and delete a profile and its shortcut
@@ -952,7 +970,7 @@ function Invoke-Main([string[]]$Argv) {
         Invoke-Cli $rest[$i] @($rest | Select-Object -Skip ($i + 1))
         return
     }
-    $pos = @(); $timeout = '300'; $all = $false
+    $pos = @(); $timeout = '300'; $all = $false; $label = $null
     for ($i = 0; $i -lt $rest.Count; $i++) {
         $a = $rest[$i]
         if ($a -ceq '--dry-run') { $script:DryRun = $true }
@@ -964,6 +982,11 @@ function Invoke-Main([string[]]$Argv) {
             $i++; $timeout = $rest[$i]
         }
         elseif ($a.StartsWith('--timeout=')) { $timeout = $a.Substring(10) }
+        elseif ($a -ceq '--label') {
+            if ($i + 1 -ge $rest.Count) { Exit-Twindesk $script:EXIT_USAGE '--label needs a value' }
+            $i++; $label = $rest[$i]
+        }
+        elseif ($a.StartsWith('--label=')) { $label = $a.Substring(8) }
         elseif ($a -ceq '--') { $pos += @($rest | Select-Object -Skip ($i + 1)); break }
         elseif ($a.StartsWith('-')) { Exit-Twindesk $script:EXIT_USAGE "unknown option: $a" }
         else { $pos += $a }
@@ -971,6 +994,10 @@ function Invoke-Main([string[]]$Argv) {
     if ($timeout -notmatch '^\d+$') { Exit-Twindesk $script:EXIT_USAGE '--timeout must be a number of seconds' }
     if ($pos.Count -gt 1) { Exit-Twindesk $script:EXIT_USAGE 'too many arguments' }
     $name = if ($pos.Count) { $pos[0] } else { '' }
+    if ($null -ne $label) {
+        if ($cmd -cne 'shortcut') { Exit-Twindesk $script:EXIT_USAGE "--label only applies to 'shortcut'" }
+        Assert-Label $label
+    }
     if ($cmd -in 'add', 'open', 'login', 'shortcut', 'alias', 'remove' -and -not $name) { Exit-Twindesk $script:EXIT_USAGE "usage: twindesk $cmd <profile>" }
     if ($cmd -in 'list', 'doctor' -and $name) { Exit-Twindesk $script:EXIT_USAGE "twindesk $cmd takes no profile" }
     switch -CaseSensitive ($cmd) {
@@ -979,7 +1006,7 @@ function Invoke-Main([string[]]$Argv) {
         'open' { Invoke-Open $name }
         'login' { Invoke-Login $name ([int]$timeout) }
         'status' { Invoke-Status $name }
-        'shortcut' { Assert-App; Assert-Profile $name; New-ProfileShortcut $name }
+        'shortcut' { Assert-App; Assert-Profile $name; New-ProfileShortcut $name ([string]$label) }
         'alias' { Invoke-Alias $name }
         'remove' { Invoke-Remove $name $all }
         'doctor' { Invoke-Doctor }

@@ -278,6 +278,18 @@ Describe 'twindesk' {
         }
     }
 
+    Describe 'shortcut label' {
+        It 'validates the label and only accepts it for shortcut' {
+            Invoke-Td @('add', 'work') | Out-Null
+            foreach ($l in @('', '../x', 'toolongtoolong', 'a"b', '-x')) {
+                (Invoke-Td @('shortcut', 'work', '--label', $l)).Code | Should -Be 2
+            }
+            $r = Invoke-Td @('open', 'work', '--label', '2')
+            $r.Code | Should -Be 2
+            $r.Out | Should -Match "only applies to 'shortcut'"
+        }
+    }
+
     Describe 'usage and misc' {
         It 'missing app exits 3' {
             $env:TWINDESK_APP = Join-Path $script:Tmp 'nope.exe'
@@ -315,8 +327,12 @@ Describe 'twindesk' {
             (Invoke-Td @('shortcut', 'work')).Code | Should -Be 0
             $lnk = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/Claude (work).lnk'
             Test-Path $lnk | Should -BeTrue
-            (Invoke-Td @('remove', 'work', '--yes')).Code | Should -Be 0
+            (Invoke-Td @('shortcut', 'work', '--label', 'Client A')).Code | Should -Be 0
             Test-Path $lnk | Should -BeFalse
+            $labelled = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/Claude (Client A).lnk'
+            Test-Path $labelled | Should -BeTrue
+            (Invoke-Td @('remove', 'work', '--yes')).Code | Should -Be 0
+            Test-Path $labelled | Should -BeFalse
         }
     }
 }

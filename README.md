@@ -56,7 +56,7 @@ Your main Claude keeps your first account. The `work` window has the second.
 | `twindesk open <profile>` | Start a profile, or bring it to the front if it is running |
 | `twindesk login <profile> [--timeout <s>]` | Guided sign-in (see below), 300 s by default |
 | `twindesk status [profile] [--json]` | Diagnostics |
-| `twindesk shortcut <profile>` | Launcher for the profile: an app in `~/Applications` (macOS), a `.desktop` file (Linux), a Start menu shortcut (Windows) |
+| `twindesk shortcut <profile> [--label <text>]` | Launcher for the profile: an app in `~/Applications` (macOS), a `.desktop` file (Linux), a Start menu shortcut (Windows). `--label` puts a badge on the launcher's icon on macOS (for example `--label 2` or `--label Work`) and names the shortcut after it on Linux and Windows |
 | `twindesk cli <profile> [args...]` | Run Claude Code CLI with the profile's own sign-in and settings |
 | `twindesk alias <profile>` | Print shell aliases to copy; nothing is written |
 | `twindesk remove <profile> [--yes] [--all]` | Stop and delete a profile and its shortcut; asks separately about the CLI profile (`--all`: delete everything without asking) |
@@ -91,7 +91,7 @@ Read this before relying on twindesk.
 - **Chrome extension is off in profiles.** Claude Desktop turns off its Chrome extension pairing when it sees a relocated data folder (its log says `local pairing disabled for this launch: userData relocated`). Only your main instance keeps it.
 - **Shared between instances:** the app binary and its updates (an update started from one instance affects the others), the logs (`~/Library/Logs/Claude`), a small system cache (`~/Library/Caches/com.anthropic.claudefordesktop`) and the keychain item "Claude Safe Storage". The browser cache itself is per profile; `--disk-cache-dir` was tested and is ignored by the app.
 - **Claude Desktop sometimes restarts by itself** after being closed (seen 2 times out of 4 in testing, cause unknown). `twindesk login` handles it.
-- **Same Dock icon.** Every running profile shows the normal Claude icon; twindesk cannot change it without modifying the app, which it never does. The `shortcut` launcher has its own name. Starting a shortcut from a script cannot steal focus (a macOS rule); clicking it does.
+- **Same Dock icon once running.** `shortcut --label` badges the launcher's icon, but a running profile still shows the normal Claude icon in the Dock: changing that would mean modifying the app, which twindesk never does. Starting a shortcut from a script cannot steal focus (a macOS rule); clicking it does.
 - **Free accounts** can sign in to the desktop app, but the app gets a `403 permission_error` when it requests Claude Code access, so Claude Code inside Desktop is probably unavailable on a free plan (not verified).
 - **Sign-in state needs `sqlite3`.** Without it, `list` shows `unknown`.
 

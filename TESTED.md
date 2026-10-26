@@ -26,6 +26,7 @@ Two different Claude accounts: account 1 (paid) in the main instance, account 2 
 | `list`, `list --json` | OK | PIDs and sign-in state match `ps` and the cookie store; JSON parsed by Python `json` |
 | `status`, `status --json` | OK | same; JSON parsed |
 | `shortcut work` | OK | `~/Applications/Claude (work).app` created; started while the profile was running: no new instance (4 before, 4 after); started by a click: the profile came to the front (seen by the user) |
+| `shortcut demo --label 2` / `--label Work` | OK (isolated HOME) | run with a temporary `HOME`, so nothing was written to the real `~/Applications`: real `osacompile` launcher, badge drawn from Claude's `electron.icns` at all 10 sizes, `Assets.car` removed so the badge shows, launcher re-signed (`codesign --verify --strict` passes); invalid labels refused with exit 2 |
 | `cli work` | OK | separate config folder, fresh Claude Code onboarding, separate sign-in through `localhost`; a new keychain item was created and the default one was not modified (same modification date); default CLI session still signed in |
 | `remove` (stopped and running profiles) | OK | `--dry-run` printed the plan and changed nothing; a running profile was stopped by PID first; folders deleted |
 | `remove work --all` | OK | profile stopped by PID, shortcut deleted, Desktop and CLI folders deleted, CLI signed out first: keychain items 17 → 16, default item unchanged |
@@ -57,8 +58,8 @@ Two different Claude accounts: account 1 (paid) in the main instance, account 2 
 
 Run on 2026-10-26:
 
-- `bats`: 39 tests, all passing, with the script run by macOS `/bin/bash` 3.2.57.
-- `Pester` 5.6.1 on PowerShell 7.4 (Linux container): 30 passing, 1 skipped (Windows-only `.lnk` test).
+- `bats`: 41 tests, all passing, with the script run by macOS `/bin/bash` 3.2.57.
+- `Pester` 5.6.1 on PowerShell 7.4 (Linux container): 31 passing, 1 skipped (Windows-only `.lnk` test).
 - `ShellCheck` 0.10.0: no findings. `PSScriptAnalyzer` 1.22.0 (Error and Warning): no findings, with one rule excluded and justified in `PSScriptAnalyzerSettings.psd1`.
 
 CI runs the same suites on macOS, Ubuntu and Windows, including Windows PowerShell 5.1.
