@@ -343,19 +343,20 @@ function Get-ProfilePid([string]$Name) {
     return $null
 }
 
+function Test-PidExpected([int]$ProcessId, [string]$Expect) {
+    if ($Expect -eq 'main') { return (@(Get-MainPid) -contains $ProcessId) }
+    if ($Expect.StartsWith('profile:')) { return ((Get-ProfilePid $Expect.Substring(8)) -eq $ProcessId) }
+    return $false
+}
+
 function Test-PidAlive([int]$ProcessId) { return [bool](Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) }
 
 # Close exactly one PID gracefully (WM_CLOSE), wait, verify. Force only as a
 # last resort, after the delay and an explicit confirmation.
 function Stop-InstancePid([int]$ProcessId, [string]$Label, [string]$Expect) {
     $limit = if ($env:TWINDESK_STOP_TIMEOUT) { [int]$env:TWINDESK_STOP_TIMEOUT } else { 20 }
-    if ($Expect -eq 'main') {
-        if (@(Get-MainPid) -notcontains $ProcessId) { Exit-Twindesk $script:EXIT_ERROR "PID $ProcessId is no longer the main instance, not touching it" }
-    }
-    else {
-        $n = $Expect.Substring(8)
-        if ((Get-ProfilePid $n) -ne $ProcessId) { Exit-Twindesk $script:EXIT_ERROR "PID $ProcessId is no longer profile '$n', not touching it" }
-    }
+    # Re-check what the PID is right before each action (PIDs can be reused).
+    if (-not (Test-PidExpected $ProcessId $Expect)) { Exit-Twindesk $script:EXIT_ERROR "PID $ProcessId is no longer $Label, not touching it" }
     if ($script:DryRun) { Write-Dry "would close $Label (PID $ProcessId)"; return }
     $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($proc) { [void]$proc.CloseMainWindow() }
@@ -364,6 +365,7 @@ function Stop-InstancePid([int]$ProcessId, [string]$Label, [string]$Expect) {
     if (Test-PidAlive $ProcessId) {
         Write-Warn "$Label (PID $ProcessId) still running after $($limit)s"
         if (Confirm-Action "Force quit $Label (PID $ProcessId)? Unsaved work in it will be lost.") {
+            if (-not (Test-PidExpected $ProcessId $Expect)) { Exit-Twindesk $script:EXIT_ERROR "PID $ProcessId is no longer $Label, not touching it" }
             Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 1
         }

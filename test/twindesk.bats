@@ -357,3 +357,12 @@ EOF
   [ "$status" -eq 0 ]
   [ ! -e "$TWINDESK_HOME/cli/scripts" ]
 }
+
+@test "stop_pid refuses a PID that is not the expected instance" {
+  sleep 30 & local other=$!
+  fn eval "APP_EXE='$FAKE_APP'; stop_pid $other 'main instance' main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no longer main instance"* ]]
+  kill -0 "$other"
+  kill "$other"
+}

@@ -366,23 +366,27 @@ pid_alive() { kill -0 "$1" 2>/dev/null; }
 
 pid_args() { ps -o args= -p "$1" 2>/dev/null || true; }
 
+pid_is_expected() { # pid expect(main|profile:<name>)
+  case "$2" in
+    main) [ "$(classify "$(pid_args "$1")" "$APP_EXE")" = "main" ] ;;
+    profile:*) [ "$(profile_pid "${2#profile:}")" = "$1" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 # Stop exactly one PID with TERM, wait, verify. KILL only as a last resort,
 # after the delay and an explicit confirmation.
 stop_pid() { # pid label expect(main|profile:<name>)
   local pid="$1" label="$2" expect="$3" args waited=0 limit="${TWINDESK_STOP_TIMEOUT:-20}"
-  # Re-check what the PID is right before signalling it (PIDs can be reused).
-  args="$(pid_args "$pid")"
-  case "$expect" in
-    main) [ "$(classify "$args" "$APP_EXE")" = "main" ] || die "$EXIT_ERROR" "PID $pid is no longer the main instance, not touching it" ;;
-    profile:*)
-      [ "$(profile_pid "${expect#profile:}")" = "$pid" ] || die "$EXIT_ERROR" "PID $pid is no longer profile '${expect#profile:}', not touching it" ;;
-  esac
+  # Re-check what the PID is right before each signal (PIDs can be reused).
+  pid_is_expected "$pid" "$expect" || die "$EXIT_ERROR" "PID $pid is no longer $label, not touching it"
   if [ "$DRY_RUN" = 1 ]; then dry "would send TERM to $label (PID $pid)"; return 0; fi
   kill -TERM "$pid" 2>/dev/null || true
   while pid_alive "$pid" && [ "$waited" -lt "$limit" ]; do sleep 1; waited=$((waited + 1)); done
   if pid_alive "$pid"; then
     warn "$label (PID $pid) still running after ${limit}s"
     if confirm "Force quit $label (PID $pid)? Unsaved work in it will be lost."; then
+      pid_is_expected "$pid" "$expect" || die "$EXIT_ERROR" "PID $pid is no longer $label, not touching it"
       kill -KILL "$pid" 2>/dev/null || true
       sleep 1
     fi
