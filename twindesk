@@ -681,14 +681,54 @@ cmd_open() { # name
   if [ "$(signed_in "$name")" = "no" ]; then say "Not signed in yet: run 'twindesk login $name'."; fi
 }
 
-LOGIN_RESTORE_MAIN=0
+# Every running instance of the app, one per line: "<pid> main", "<pid> profile <name>"
+# or "<pid> foreign" (launched with a --user-data-dir that is not a twindesk profile).
+app_instances() {
+  local pid args rest kind n prefix
+  [ -n "$APP_EXE" ] || return 0
+  prefix="--user-data-dir=$PROFILES_DIR/"
+  while read -r pid args; do
+    [ -n "$pid" ] || continue
+    kind="$(classify "$args" "$APP_EXE")"
+    case "$kind" in
+      main) printf '%s main\n' "$pid" ;;
+      profile)
+        rest="$(strip_exe "$args" "$APP_EXE")"
+        n=""
+        case "$rest" in "$prefix"*) n="${rest#"$prefix"}"; n="${n%% --*}" ;; esac
+        if [ -n "$n" ] && name_ok "$n" && [ "$(profile_pid "$n")" = "$pid" ]; then
+          printf '%s profile %s\n' "$pid" "$n"
+        else
+          printf '%s foreign\n' "$pid"
+        fi
+        ;;
+    esac
+  done <<EOF
+$(ps_snapshot)
+EOF
+}
 
+# Instances other than profile <name>.
+other_instances() { app_instances | awk -v n="$1" '!($2 == "profile" && $3 == n)'; }
+
+LOGIN_RESTORE_MAIN=0
+LOGIN_RESTORE_PROFILES=""
+
+# Restart what the sign-in closed: the main instance and the other profiles.
 login_cleanup() {
+  local n
   if [ "$LOGIN_RESTORE_MAIN" = 1 ] && [ -z "$(main_pid_any)" ]; then
     info "restarting the main instance"
     launch_main || true
   fi
+  for n in $LOGIN_RESTORE_PROFILES; do
+    if [ -z "$(profile_pid "$n")" ]; then
+      info "restarting profile '$n'"
+      launch_profile "$n" || true
+    fi
+  done
   LOGIN_RESTORE_MAIN=0
+  LOGIN_RESTORE_PROFILES=""
 }
 
 on_login_interrupt() {
@@ -698,30 +738,62 @@ on_login_interrupt() {
   exit "$EXIT_INTERRUPTED"
 }
 
+# Close every instance except profile <name>, by PID. Remembers what to restart.
+close_other_instances() { # name
+  local pid kind n
+  while read -r pid kind n; do
+    [ -n "$pid" ] || continue
+    case "$kind" in
+      main)
+        LOGIN_RESTORE_MAIN=1
+        stop_pid "$pid" "main instance" main ;;
+      profile)
+        case " $LOGIN_RESTORE_PROFILES " in *" $n "*) ;; *) LOGIN_RESTORE_PROFILES="$LOGIN_RESTORE_PROFILES $n" ;; esac
+        stop_pid "$pid" "profile '$n'" "profile:$n" ;;
+    esac
+  done <<EOF
+$(other_instances "$1")
+EOF
+}
+
+describe_instance() { # pid kind name
+  case "$2" in
+    main) printf 'main instance (PID %s)' "$1" ;;
+    profile) printf "profile '%s' (PID %s)" "$3" "$1" ;;
+  esac
+}
+
 cmd_login() { # name timeout
-  local name="$1" timeout="$2" pid main elapsed=0 state
+  local name="$1" timeout="$2" pid elapsed=0 state others list="" p k n
   require_app
   require_profile "$name"
   if [ "$(signed_in "$name")" = "yes" ]; then ok "profile '$name' is already signed in"; return 0; fi
-  main="$(main_pid_any)"
+  others="$(other_instances "$name")"
+  if printf '%s\n' "$others" | grep -q ' foreign$'; then
+    die "$EXIT_ERROR" "a Claude instance not managed by twindesk is running with its own --user-data-dir (PID $(printf '%s\n' "$others" | awk '$2 == "foreign" { print $1; exit }')). Close it yourself, then retry."
+  fi
 
-  say "Sign-in links (claude://) are always delivered to the main Claude instance,"
-  say "so it has to be closed while profile '$name' signs in."
-  if [ -n "$main" ]; then
-    warn "closing the main instance (PID $main) interrupts any Claude Code or Cowork session running in it."
-    confirm "Close the main instance now? It is restarted at the end." || die "$EXIT_ERROR" "cancelled"
+  say "A sign-in link (claude://) reaches only one running Claude instance, usually not"
+  say "the one signing in, so every other instance is closed while profile '$name' signs in."
+  while read -r p k n; do
+    [ -n "$p" ] || continue
+    list="$list${list:+, }$(describe_instance "$p" "$k" "$n")"
+  done <<EOF
+$others
+EOF
+  if [ -n "$list" ]; then
+    say "To close: $list."
+    warn "closing an instance interrupts any Claude Code or Cowork session running in it."
+    confirm "Close them now? They are restarted at the end." || die "$EXIT_ERROR" "cancelled"
   fi
   if [ "$DRY_RUN" = 1 ]; then
-    [ -n "$main" ] && dry "would stop the main instance (PID $main)"
-    dry "would start profile '$name', wait up to ${timeout}s for sign-in, then restart the main instance"
+    [ -n "$list" ] && dry "would close: $list"
+    dry "would start profile '$name', wait up to ${timeout}s for sign-in, then restart what was closed"
     return 0
   fi
 
   trap on_login_interrupt INT TERM
-  if [ -n "$main" ]; then
-    LOGIN_RESTORE_MAIN=1
-    stop_pid "$main" "main instance" main
-  fi
+  close_other_instances "$name"
 
   pid="$(profile_pid "$name")"
   if [ -z "$pid" ]; then
@@ -735,15 +807,19 @@ cmd_login() { # name timeout
   say "In the window of profile '$name':"
   say "  1. Sign in (email link or Google)."
   say "  2. When the browser asks to open Claude, accept."
-  say "Waiting up to ${timeout}s. Press Ctrl+C to cancel (the main instance is restarted)."
+  say "Waiting up to ${timeout}s. Press Ctrl+C to cancel (closed instances are restarted)."
 
   while :; do
     state="$(signed_in "$name")"
     if [ "$state" = "yes" ]; then break; fi
-    main="$(main_pid_any)"
-    if [ -n "$main" ]; then
-      warn "the main instance restarted by itself (PID $main), closing it again."
-      stop_pid "$main" "main instance" main
+    others="$(other_instances "$name")"
+    if [ -n "$others" ]; then
+      if printf '%s\n' "$others" | grep -q ' foreign$'; then
+        login_cleanup
+        die "$EXIT_ERROR" "a Claude instance not managed by twindesk started during sign-in. Close it yourself, then retry."
+      fi
+      warn "another Claude instance started during sign-in ($(printf '%s' "$others" | awk '{ print $1 }' | tr '\n' ' ' | sed 's/ *$//')), closing it again."
+      close_other_instances "$name"
       warn "if you already clicked the link, it went to the wrong instance: click 'Open Claude' in the browser again now."
     fi
     if [ -z "$(profile_pid "$name")" ]; then
@@ -758,15 +834,19 @@ cmd_login() { # name timeout
   done
   ok "profile '$name' is signed in"
 
-  local restore="$LOGIN_RESTORE_MAIN"
+  local restore_main="$LOGIN_RESTORE_MAIN" restore_profiles="$LOGIN_RESTORE_PROFILES"
   login_cleanup
   trap - INT TERM
-  if [ "$restore" = 1 ]; then
-    main="$(wait_for_pid main_pid_any x 30 || true)"
-    if [ -n "$main" ]; then ok "main instance running again (PID $main)"; else warn "main instance did not come back within 30s"; fi
+  if [ "$restore_main" = 1 ]; then
+    p="$(wait_for_pid main_pid_any x 30 || true)"
+    if [ -n "$p" ]; then ok "main instance running again (PID $p)"; else warn "main instance did not come back within 30s"; fi
   else
     say "main instance left stopped (it was not running before)"
   fi
+  for n in $restore_profiles; do
+    p="$(wait_for_pid profile_pid "$n" 30 || true)"
+    if [ -n "$p" ]; then ok "profile '$n' running again (PID $p)"; else warn "profile '$n' did not come back within 30s"; fi
+  done
   pid="$(profile_pid "$name")"
   [ -n "$pid" ] && ok "profile '$name' running (PID $pid), signed in: $(signed_in "$name")"
 }
@@ -937,7 +1017,7 @@ Commands:
   add <profile>              create a profile
   list [--json]              list profiles: running, PID, signed in, size
   open <profile>             start a profile, or bring it to the front
-  login <profile>            guided sign-in (closes the main instance meanwhile)
+  login <profile>            guided sign-in (closes other instances meanwhile)
                              [--timeout <seconds>] (default 300)
   status [profile] [--json]  diagnostic
   shortcut <profile>         create a launcher for the profile

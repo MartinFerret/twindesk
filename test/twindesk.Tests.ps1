@@ -121,6 +121,33 @@ Describe 'twindesk' {
         }
     }
 
+    Describe 'instances for login' {
+        It 'labels the main instance, twindesk profiles and foreign data dirs' {
+            $base = Join-Path $script:Tmp 'local/AnthropicClaude'
+            $exe = Join-Path $base 'app-1.2.3/claude.exe'
+            $prof = Join-Path $env:TWINDESK_HOME 'profiles'
+            Set-Content -LiteralPath $env:TWINDESK_PS_FIXTURE -Value @(
+                "101`t$exe`t`"$exe`"",
+                "202`t$exe`t`"$exe`" `"--user-data-dir=$(Join-Path $prof 'work')`"",
+                "303`t$exe`t`"$exe`" `"--user-data-dir=$(Join-Path $prof 'other')`"",
+                "404`t$exe`t`"$exe`" `"--user-data-dir=$(Join-Path $script:Tmp 'elsewhere')`""
+            )
+            . $script:LoadTd
+            [void](Find-App)
+            $o = @(Get-OtherInstance 'work')
+            ($o | ForEach-Object { "$($_.Pid):$($_.Kind):$($_.Name)" }) -join ' ' | Should -Be '101:main: 303:profile:other 404:foreign:'
+        }
+        It 'login refuses while a foreign instance runs' {
+            New-Item -ItemType Directory -Force -Path (Join-Path $env:TWINDESK_HOME 'profiles/work') | Out-Null
+            $base = Join-Path $script:Tmp 'local/AnthropicClaude'
+            $exe = Join-Path $base 'app-1.2.3/claude.exe'
+            Set-Content -LiteralPath $env:TWINDESK_PS_FIXTURE -Value "404`t$exe`t`"$exe`" `"--user-data-dir=$(Join-Path $script:Tmp 'elsewhere')`""
+            $r = Invoke-Td @('login', 'work', '--yes')
+            $r.Code | Should -Be 1
+            $r.Out | Should -Match 'not managed by twindesk'
+        }
+    }
+
     Describe 'data root and deletion guards' {
         It 'requires the root to be named twindesk' {
             $env:TWINDESK_HOME = Join-Path $script:Tmp 'elsewhere'

@@ -605,35 +605,92 @@ function Invoke-Open([string]$Name) {
     if ((Get-SignedIn $Name) -eq 'no') { Write-Say "Not signed in yet: run 'twindesk login $Name'." }
 }
 
-$script:LoginRestoreMain = $false
+# Every running instance: objects with Pid, Kind (main|profile|foreign) and Name.
+function Get-AppInstance {
+    $prefix = $script:ProfilesDir.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    foreach ($p in Get-ProcessSnapshot) {
+        $kind = Get-InstanceKind $p
+        if ($kind -eq 'main') { [pscustomobject]@{ Pid = $p.Pid; Kind = 'main'; Name = '' }; continue }
+        if ($kind -ne 'profile') { continue }
+        $argv = Split-CommandLine $p.CommandLine
+        $n = ''
+        foreach ($a in @($argv | Select-Object -Skip 1)) {
+            if ($a.StartsWith('--user-data-dir=')) {
+                $v = $a.Substring(16).Replace('/', [System.IO.Path]::DirectorySeparatorChar).TrimEnd('\', '/')
+                $pfx = $prefix.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+                if ($v.StartsWith($pfx, [System.StringComparison]::OrdinalIgnoreCase)) { $n = $v.Substring($pfx.Length) }
+            }
+        }
+        if ($n -and (Test-NameOk $n) -and (Get-ProfilePid $n) -eq $p.Pid) { [pscustomobject]@{ Pid = $p.Pid; Kind = 'profile'; Name = $n } }
+        else { [pscustomobject]@{ Pid = $p.Pid; Kind = 'foreign'; Name = '' } }
+    }
+}
 
+function Get-OtherInstance([string]$Name) {
+    Get-AppInstance | Where-Object { -not ($_.Kind -eq 'profile' -and $_.Name -eq $Name) }
+}
+
+function Format-Instance($i) {
+    if ($i.Kind -eq 'main') { return "main instance (PID $($i.Pid))" }
+    return "profile '$($i.Name)' (PID $($i.Pid))"
+}
+
+$script:LoginRestoreMain = $false
+$script:LoginRestoreProfiles = @()
+
+# Restart what the sign-in closed: the main instance and the other profiles.
 function Invoke-LoginCleanup {
     if ($script:LoginRestoreMain -and -not @(Get-MainPid).Count) {
         Write-Info 'restarting the main instance'
         try { Start-Main } catch { Write-Warn $_.Exception.Message }
     }
+    foreach ($n in $script:LoginRestoreProfiles) {
+        if (-not (Get-ProfilePid $n)) {
+            Write-Info "restarting profile '$n'"
+            try { Start-Profile $n } catch { Write-Warn $_.Exception.Message }
+        }
+    }
     $script:LoginRestoreMain = $false
+    $script:LoginRestoreProfiles = @()
+}
+
+# Close every instance except profile <name>, by PID. Remembers what to restart.
+function Close-OtherInstance([string]$Name) {
+    foreach ($i in @(Get-OtherInstance $Name)) {
+        if ($i.Kind -eq 'main') { $script:LoginRestoreMain = $true; Stop-InstancePid $i.Pid 'main instance' 'main' }
+        elseif ($i.Kind -eq 'profile') {
+            if ($script:LoginRestoreProfiles -notcontains $i.Name) { $script:LoginRestoreProfiles += $i.Name }
+            Stop-InstancePid $i.Pid "profile '$($i.Name)'" "profile:$($i.Name)"
+        }
+    }
 }
 
 function Invoke-Login([string]$Name, [int]$Timeout) {
     Assert-App
     Assert-Profile $Name
     if ((Get-SignedIn $Name) -eq 'yes') { Write-Ok "profile '$Name' is already signed in"; return }
-    $main = @(Get-MainPid)[0]
-    Write-Say 'Sign-in links (claude://) are always delivered to the main Claude instance,'
-    Write-Say "so it has to be closed while profile '$Name' signs in."
-    if ($main) {
-        Write-Warn "closing the main instance (PID $main) interrupts any Claude Code or Cowork session running in it."
-        if (-not (Confirm-Action 'Close the main instance now? It is restarted at the end.')) { Exit-Twindesk $script:EXIT_ERROR 'cancelled' }
+    $others = @(Get-OtherInstance $Name)
+    $foreign = @($others | Where-Object { $_.Kind -eq 'foreign' })
+    if ($foreign.Count) {
+        Exit-Twindesk $script:EXIT_ERROR "a Claude instance not managed by twindesk is running with its own --user-data-dir (PID $($foreign[0].Pid)). Close it yourself, then retry."
+    }
+    Write-Say 'A sign-in link (claude://) reaches only one running Claude instance, usually not'
+    Write-Say "the one signing in, so every other instance is closed while profile '$Name' signs in."
+    $list = ($others | ForEach-Object { Format-Instance $_ }) -join ', '
+    if ($list) {
+        Write-Say "To close: $list."
+        Write-Warn 'closing an instance interrupts any Claude Code or Cowork session running in it.'
+        if (-not (Confirm-Action 'Close them now? They are restarted at the end.')) { Exit-Twindesk $script:EXIT_ERROR 'cancelled' }
     }
     if ($script:DryRun) {
-        if ($main) { Write-Dry "would stop the main instance (PID $main)" }
-        Write-Dry "would start profile '$Name', wait up to $($Timeout)s for sign-in, then restart the main instance"
+        if ($list) { Write-Dry "would close: $list" }
+        Write-Dry "would start profile '$Name', wait up to $($Timeout)s for sign-in, then restart what was closed"
         return
     }
     $completed = $false
+    $restoreMain = $false; $restoreProfiles = @()
     try {
-        if ($main) { $script:LoginRestoreMain = $true; Stop-InstancePid $main 'main instance' 'main' }
+        Close-OtherInstance $Name
         $p = Get-ProfilePid $Name
         if (-not $p) {
             Start-Profile $Name
@@ -646,14 +703,17 @@ function Invoke-Login([string]$Name, [int]$Timeout) {
         Write-Say "In the window of profile '$($Name)':"
         Write-Say '  1. Sign in (email link or Google).'
         Write-Say '  2. When the browser asks to open Claude, accept.'
-        Write-Say "Waiting up to $($Timeout)s. Press Ctrl+C to cancel (the main instance is restarted)."
+        Write-Say "Waiting up to $($Timeout)s. Press Ctrl+C to cancel (closed instances are restarted)."
         $elapsed = 0
         while ($true) {
             if ((Get-SignedIn $Name) -eq 'yes') { break }
-            $m = @(Get-MainPid)[0]
-            if ($m) {
-                Write-Warn "the main instance restarted by itself (PID $m), closing it again."
-                Stop-InstancePid $m 'main instance' 'main'
+            $again = @(Get-OtherInstance $Name)
+            if ($again.Count) {
+                if (@($again | Where-Object { $_.Kind -eq 'foreign' }).Count) {
+                    Exit-Twindesk $script:EXIT_ERROR 'a Claude instance not managed by twindesk started during sign-in. Close it yourself, then retry.'
+                }
+                Write-Warn "another Claude instance started during sign-in ($(($again | ForEach-Object { $_.Pid }) -join ' ')), closing it again."
+                Close-OtherInstance $Name
                 Write-Warn "if you already clicked the link, it went to the wrong instance: click 'Open Claude' in the browser again now."
             }
             if (-not (Get-ProfilePid $Name)) { Exit-Twindesk $script:EXIT_ERROR "profile '$Name' was closed before signing in" }
@@ -665,14 +725,19 @@ function Invoke-Login([string]$Name, [int]$Timeout) {
     }
     finally {
         # Runs on success, error and Ctrl+C alike.
-        $restore = $script:LoginRestoreMain
+        $restoreMain = $script:LoginRestoreMain
+        $restoreProfiles = @($script:LoginRestoreProfiles)
         Invoke-LoginCleanup
         if ($completed) {
-            if ($restore) {
+            if ($restoreMain) {
                 $m = Wait-ForPid { Get-MainPid } 30
                 if ($m) { Write-Ok "main instance running again (PID $m)" } else { Write-Warn 'main instance did not come back within 30s' }
             }
             else { Write-Say 'main instance left stopped (it was not running before)' }
+            foreach ($n in $restoreProfiles) {
+                $q = Wait-ForPid { Get-ProfilePid $n } 30
+                if ($q) { Write-Ok "profile '$n' running again (PID $q)" } else { Write-Warn "profile '$n' did not come back within 30s" }
+            }
             $p = Get-ProfilePid $Name
             if ($p) { Write-Ok "profile '$Name' running (PID $p), signed in: $(Get-SignedIn $Name)" }
         }
@@ -835,7 +900,7 @@ Commands:
   add <profile>              create a profile
   list [--json]              list profiles: running, PID, signed in, size
   open <profile>             start a profile, or bring it to the front
-  login <profile>            guided sign-in (closes the main instance meanwhile)
+  login <profile>            guided sign-in (closes other instances meanwhile)
                              [--timeout <seconds>] (default 300)
   status [profile] [--json]  diagnostic
   shortcut <profile>         create a launcher for the profile

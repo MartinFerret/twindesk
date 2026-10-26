@@ -366,3 +366,28 @@ EOF
   kill -0 "$other"
   kill "$other"
 }
+
+@test "login also closes other profiles by PID and restarts them" {
+  td add work
+  td add other
+  td open other
+  local other_pid; other_pid="$(fn eval "APP_EXE='$FAKE_APP'; profile_pid other"; printf '%s' "$output")"
+  [ -n "$other_pid" ]
+  ( sleep 4; make_cookies "$TWINDESK_HOME/profiles/work" "$(chromium_time 3600)" ) &
+  td login work --yes --timeout 30
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"To close: profile 'other' (PID $other_pid)"* ]]
+  [[ "$output" == *"profile 'other' stopped (PID $other_pid)"* ]]
+  [[ "$output" == *"profile 'other' running again"* ]]
+  ! kill -0 "$other_pid" 2>/dev/null
+}
+
+@test "login refuses when a non-twindesk instance with its own data dir runs" {
+  td add work
+  "$FAKE_APP" --user-data-dir="$HOME/elsewhere" >/dev/null 2>&1 & local foreign=$!
+  td login work --yes --timeout 5
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not managed by twindesk"* ]]
+  kill -0 "$foreign"
+  kill -TERM "$foreign"
+}
