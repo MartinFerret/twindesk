@@ -35,4 +35,4 @@ Maintainer checklist for a new version `X.Y.Z`.
    brew test MartinFerret/twindesk/twindesk
    ```
 
-4. Commit and push the tap.
+3. Commit and push the tap.

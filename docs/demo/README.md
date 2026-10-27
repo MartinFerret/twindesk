@@ -2,10 +2,11 @@
 
 `docs/demo.gif` and `docs/demo.mp4` are rendered with [Remotion](https://www.remotion.dev) from this folder.
 
-- The terminal shows the output in `recordings/` verbatim. It was recorded on macOS 26.2 with Claude Desktop 3.6556.2 during the real tests of twindesk 0.1.0; the home folder is anonymized to `/Users/you`.
-- The "Claude instances" panel is an illustration. Its state changes only when an output line says so (for example `ok main instance stopped`).
+- Every terminal line comes verbatim from `recordings/`, recorded on macOS 26.2 with Claude Desktop 3.6556.2 during the real tests of twindesk 0.1.0 (home folder anonymized to `/Users/you`). A `…` line marks output lines that were skipped for brevity.
+- The two windows are an illustration. Their state changes only when one of those output lines says so (for example `ok main instance stopped`).
+- The Claude icon is Anthropic's trademark. It is not committed here: `make-data.mjs` copies it from your local `/Applications/Claude.app` at render time (or from the `.icns` file in `CLAUDE_ICNS`). twindesk is not affiliated with Anthropic.
 
-To render again (needs Node 18+ and ffmpeg):
+To render again (macOS with Claude Desktop installed, Node 18+ and ffmpeg):
 
 ```sh
 npm ci
