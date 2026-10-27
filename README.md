@@ -16,7 +16,13 @@ It also gives you a separate Claude Code CLI sign-in per profile, which needs no
 
 ## Install
 
-macOS and Linux:
+macOS, with Homebrew:
+
+```sh
+brew install MartinFerret/twindesk/twindesk
+```
+
+macOS and Linux, from a clone:
 
 ```sh
 git clone https://github.com/MartinFerret/twindesk.git
@@ -127,6 +133,8 @@ It never modifies Claude Desktop, its signature, the `claude://` handler or your
 ./install.sh --uninstall                  # asks whether to keep your profiles
 ./install.sh --uninstall --keep-profiles  # or --purge to delete them
 ```
+
+With Homebrew: `brew uninstall twindesk` (profiles are kept; run `twindesk remove <profile> --all` first to delete them).
 
 On Windows: `.\install.ps1 -Uninstall` (with `-KeepProfiles` or `-Purge`). Purging goes through `twindesk remove --all` for each profile.
 

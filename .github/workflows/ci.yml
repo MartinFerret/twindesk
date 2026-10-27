@@ -16,7 +16,7 @@ jobs:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install ShellCheck and bats
         run: |
           if [ "$RUNNER_OS" = macOS ]; then brew install shellcheck; else sudo apt-get update && sudo apt-get install -y shellcheck sqlite3; fi
@@ -38,13 +38,18 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Pester and PSScriptAnalyzer
         shell: pwsh
         run: |
+          # PowerShell Gallery downloads fail now and then: retry before giving up.
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module Pester -RequiredVersion 5.6.1 -Scope CurrentUser -Force -SkipPublisherCheck
-          Install-Module PSScriptAnalyzer -RequiredVersion 1.22.0 -Scope CurrentUser -Force
+          foreach ($m in @(@{ Name = 'Pester'; Version = '5.6.1' }, @{ Name = 'PSScriptAnalyzer'; Version = '1.22.0' })) {
+            for ($i = 1; $i -le 3; $i++) {
+              try { Install-Module $m.Name -RequiredVersion $m.Version -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop; break }
+              catch { if ($i -eq 3) { throw }; Write-Warning "attempt $i failed: $($_.Exception.Message)"; Start-Sleep -Seconds (10 * $i) }
+            }
+          }
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
@@ -63,7 +68,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          Install-Module Pester -RequiredVersion 5.6.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          for ($i = 1; $i -le 3; $i++) {
+            try { Install-Module Pester -RequiredVersion 5.6.1 -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop; break }
+            catch { if ($i -eq 3) { throw }; Write-Warning "attempt $i failed: $($_.Exception.Message)"; Start-Sleep -Seconds (10 * $i) }
+          }
           Import-Module Pester -RequiredVersion 5.6.1
           $c = New-PesterConfiguration
           $c.Run.Path = 'test'
