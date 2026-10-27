@@ -34,7 +34,7 @@ const TEXT = {
     ],
     foot: 'Free and open source',
     install: 'Install',
-    legal: 'macOS · Not affiliated with Anthropic',
+    legal: 'Tested on macOS · Linux and Windows in beta · Not affiliated with Anthropic',
   },
   fr: {
     title: ['Deux comptes Claude.', 'Côte à côte.'],
@@ -49,7 +49,7 @@ const TEXT = {
     ],
     foot: 'Gratuit et open source',
     install: 'Installer',
-    legal: 'macOS · Non affilié à Anthropic',
+    legal: 'Testé sur macOS · Linux et Windows en bêta · Non affilié à Anthropic',
   },
 };
 
@@ -136,7 +136,7 @@ export const LinkedIn: React.FC<{ lang: 'en' | 'fr' }> = ({ lang }) => {
           <div style={{ fontSize: 26, fontWeight: 700, color: C.ink }}>
             {t.foot} · <span style={{ color: C.coral }}>github.com/MartinFerret/twindesk</span>
           </div>
-          <div style={{ fontSize: 17, color: C.faint }}>{t.legal}</div>
+          <div style={{ fontSize: 19, color: C.mute }}>{t.legal}</div>
         </div>
       </div>
     </AbsoluteFill>
