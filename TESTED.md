@@ -54,6 +54,24 @@ Two different Claude accounts: account 1 (paid) in the main instance, account 2 
 - The forced kill path (no instance ever ignored TERM within 20 s).
 - `install.sh` and `install.ps1` on a real machine beyond the unit-level checks.
 
+## Homebrew tap
+
+Run on 2026-10-27 with Homebrew 7.0.8 on the same Mac, for twindesk 0.1.0:
+
+| Check | Result |
+|---|---|
+| Checksum of the release archive (`curl -fsSL .../v0.1.0.tar.gz \| shasum -a 256`) | `bc2784734f8fa67c89089fd5cbd2c2ee98765f80df2b185fb84cad929b7d7943`, same as the formula |
+| `brew install --build-from-source ./Formula/twindesk.rb` | refused by Homebrew 7 (formulae must be in a tap); the local clone was tapped instead with `brew tap MartinFerret/twindesk ~/homebrew-twindesk` |
+| `brew audit --new --strict --online MartinFerret/twindesk/twindesk` | exit 0, no findings |
+| `brew style MartinFerret/twindesk` | no offenses |
+| `brew install --build-from-source MartinFerret/twindesk/twindesk` (local tap) | installed `/opt/homebrew/Cellar/twindesk/0.1.0` |
+| `brew test MartinFerret/twindesk/twindesk` | exit 0 |
+| `twindesk --version` from `/opt/homebrew/bin` | `twindesk 0.1.0` |
+| `brew uninstall`, `brew untap`, then `brew install MartinFerret/twindesk/twindesk` | tapped from `https://github.com/MartinFerret/homebrew-twindesk`, installed, `twindesk --version` → `twindesk 0.1.0`, `twindesk doctor` OK |
+| Shortcut path with a Homebrew install | `/opt/homebrew/bin/twindesk` (survives `brew upgrade`), not the versioned Cellar path |
+
+Not verified: `brew upgrade` to a later version (there is none yet).
+
 ## Unit tests
 
 Run on 2026-10-26:

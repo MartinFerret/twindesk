@@ -18,14 +18,16 @@ Maintainer checklist for a new version `X.Y.Z`.
 
 ## In the Homebrew tap (MartinFerret/homebrew-twindesk)
 
-1. Compute the checksum of the release archive:
+1. From this repository, with the tap cloned at `~/homebrew-twindesk` (or pass `--tap <path>`):
 
    ```sh
-   curl -fsSL https://github.com/MartinFerret/twindesk/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
+   scripts/bump-formula.sh X.Y.Z --dry-run   # shows the checksum and the diff
+   scripts/bump-formula.sh X.Y.Z             # writes url and sha256 into Formula/twindesk.rb
    ```
 
-2. In `Formula/twindesk.rb`, update `url` and `sha256`.
-3. Check the formula, then install it from the tap and run its test:
+   It downloads the release archive, checks that it contains `twindesk` at version X.Y.Z, and computes the checksum (`curl -fsSL <archive> | shasum -a 256`). It never commits or pushes.
+
+2. Check the formula, then install it from the tap and run its test (Homebrew only installs formulae from a tap, not from a file path):
 
    ```sh
    brew audit --strict --online MartinFerret/twindesk/twindesk

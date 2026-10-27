@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Homebrew tap: `brew install MartinFerret/twindesk/twindesk` ([MartinFerret/homebrew-twindesk](https://github.com/MartinFerret/homebrew-twindesk)), installing 0.1.0.
+- `scripts/bump-formula.sh` updates the formula for a new release; `RELEASING.md` describes the release steps.
+
 ## 0.1.0 – 2026-10-26
 
 First release.
