@@ -34,7 +34,7 @@ Things we do not know yet on Linux and Windows:
 Before a pull request:
 
 ```sh
-shellcheck -x twindesk install.sh test/helpers.bash
+shellcheck -x twindesk install.sh scripts/bump-formula.sh test/helpers.bash
 TD_BASH=/bin/bash bats test/
 ```
 

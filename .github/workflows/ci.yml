@@ -24,9 +24,9 @@ jobs:
       - name: Show the bash used for tests
         run: /bin/bash --version | head -n 1
       - name: ShellCheck
-        run: shellcheck -x twindesk install.sh test/helpers.bash
+        run: shellcheck -x twindesk install.sh scripts/bump-formula.sh test/helpers.bash
       - name: Bash syntax with system bash
-        run: /bin/bash -n twindesk && /bin/bash -n install.sh
+        run: /bin/bash -n twindesk && /bin/bash -n install.sh && /bin/bash -n scripts/bump-formula.sh
       - name: Unit tests (bats, script run by /bin/bash)
         run: TD_BASH=/bin/bash "$RUNNER_TEMP/bats/bin/bats" test/
 
